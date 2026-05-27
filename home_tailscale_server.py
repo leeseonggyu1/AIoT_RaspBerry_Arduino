@@ -112,6 +112,24 @@ PRESENCE_TARGET_CONFIGURED = has_real_mac(PHONE_BLUETOOTH_MAC) or bool(PHONE_NAM
 PRESENCE_DEFAULT_ENABLED = platform.system() == "Linux" and PRESENCE_TARGET_CONFIGURED
 PRESENCE_ENABLED = env_or_config_bool("PRESENCE_ENABLED", config, "presence_enabled", PRESENCE_DEFAULT_ENABLED)
 
+LIGHT_SENSOR_ENABLED = env_or_config_bool("LIGHT_SENSOR_ENABLED", config, "light_sensor_enabled", True)
+LIGHT_DARK_THRESHOLD = env_or_config_int("LIGHT_DARK_THRESHOLD", config, "light_dark_threshold", 250)
+LIGHT_DARK_WHEN_LOW = env_or_config_bool("LIGHT_DARK_WHEN_LOW", config, "light_dark_when_low", True)
+SLEEP_SUGGEST_AFTER_SECONDS = env_or_config_int(
+    "SLEEP_SUGGEST_AFTER_SECONDS",
+    config,
+    "sleep_suggest_after_seconds",
+    300,
+)
+SLEEP_SUGGEST_START = env_or_config_str("SLEEP_SUGGEST_START", config, "sleep_suggest_start", "22:00")
+SLEEP_SUGGEST_END = env_or_config_str("SLEEP_SUGGEST_END", config, "sleep_suggest_end", "03:00")
+SLEEP_SUGGEST_DISMISS_SECONDS = env_or_config_int(
+    "SLEEP_SUGGEST_DISMISS_SECONDS",
+    config,
+    "sleep_suggest_dismiss_seconds",
+    3600,
+)
+
 # 기존 아두이노 스케치와 새 home_controller.ino가 둘 다 받을 수 있는 명령입니다.
 AIRCON_TOGGLE_COMMAND = "PUSH"
 HUMIDIFIER_ON_COMMAND = "HUMIDIFIER_ON"
@@ -140,6 +158,19 @@ state = {
     "presence_missing_since": None,
     "last_presence_error": "",
     "away_after_seconds": AWAY_AFTER_SECONDS,
+    "light_sensor_enabled": LIGHT_SENSOR_ENABLED,
+    "light_raw": None,
+    "light_level_percent": None,
+    "is_dark": False,
+    "dark_since_at": None,
+    "light_dark_threshold": LIGHT_DARK_THRESHOLD,
+    "light_dark_when_low": LIGHT_DARK_WHEN_LOW,
+    "sleep_mode": False,
+    "sleep_suggestion_pending": False,
+    "sleep_suggestion_ignored_until": None,
+    "sleep_suggest_after_seconds": SLEEP_SUGGEST_AFTER_SECONDS,
+    "sleep_suggest_start": SLEEP_SUGGEST_START,
+    "sleep_suggest_end": SLEEP_SUGGEST_END,
 }
 
 arduino = None
@@ -169,9 +200,13 @@ class MockArduino:
         elapsed = int(time.monotonic() - self.started_at)
         temperature = 24.0 + (elapsed % 8) * 0.2
         humidity = 45.0 + (elapsed % 6) * 0.5
+        light_raw = 180 if (elapsed // 20) % 2 else 620
         humidifier = "ON" if self.humidifier_on else "OFF"
         time.sleep(1)
-        return f"온도: {temperature:.2f} C, 습도: {humidity:.2f} %, 가습기: {humidifier}\n".encode("utf-8")
+        return (
+            f"온도: {temperature:.2f} C, 습도: {humidity:.2f} %, "
+            f"조도: {light_raw}, 가습기: {humidifier}\n"
+        ).encode("utf-8")
 
     def close(self):
         pass
@@ -186,15 +221,17 @@ INDEX_HTML = """<!doctype html>
   <style>
     :root {
       color-scheme: light;
-      --bg: #f5f7fb;
+      --bg: #f6f7f9;
       --panel: #ffffff;
-      --text: #17202a;
+      --panel-soft: #f8fafc;
+      --text: #18212f;
       --muted: #667085;
-      --line: #d7dde8;
-      --blue: #2563eb;
+      --line: #d9e0ea;
+      --blue: #1f6feb;
       --green: #16803c;
       --red: #b42318;
       --amber: #b54708;
+      --shadow: 0 10px 24px rgba(20, 31, 48, 0.08);
     }
 
     * {
@@ -206,45 +243,316 @@ INDEX_HTML = """<!doctype html>
       background: var(--bg);
       color: var(--text);
       font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      font-size: 15px;
     }
 
     main {
-      width: min(920px, 100%);
+      width: min(1080px, 100%);
       margin: 0 auto;
-      padding: 20px;
+      padding: 18px 18px 28px;
     }
 
     header {
       display: flex;
       align-items: center;
-      justify-content: space-between;
+      justify-content: flex-end;
       gap: 16px;
-      margin-bottom: 16px;
-    }
-
-    h1 {
-      margin: 0;
-      font-size: 24px;
-      letter-spacing: 0;
+      padding: 0 0 12px;
     }
 
     .updated {
+      display: inline-flex;
+      align-items: center;
+      min-height: 32px;
+      padding: 5px 10px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
       color: var(--muted);
       font-size: 14px;
       white-space: nowrap;
     }
 
     .grid {
+      display: none;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .simple {
+      display: grid;
+      gap: 12px;
+    }
+
+    .simple-readout {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+    }
+
+    .readout-item {
+      min-height: 176px;
+      padding: 14px 10px 16px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+      display: grid;
+      justify-items: center;
+      align-content: center;
+      gap: 10px;
+    }
+
+    .readout-value {
+      margin-top: 5px;
+      font-size: 24px;
+      font-weight: 760;
+      letter-spacing: 0;
+      line-height: 1.1;
+    }
+
+    .gauge {
+      --gauge-color: var(--green);
+      --gauge-angle: 90deg;
+      --gauge-track: #e8edf4;
+      width: min(250px, 100%);
+      aspect-ratio: 2 / 1;
+      border-radius: 999px 999px 0 0;
+      display: grid;
+      place-items: end center;
+      padding-bottom: 8px;
+      background: conic-gradient(
+        from 270deg at 50% 100%,
+        var(--gauge-color) 0deg var(--gauge-angle),
+        var(--gauge-track) var(--gauge-angle) 180deg,
+        transparent 180deg 360deg
+      );
+      position: relative;
+      overflow: hidden;
+    }
+
+    .gauge::before {
+      content: "";
+      position: absolute;
+      left: clamp(16px, 10%, 26px);
+      right: clamp(16px, 10%, 26px);
+      top: clamp(16px, 18%, 26px);
+      bottom: 0;
+      border-radius: 999px 999px 0 0;
+      background: var(--panel);
+    }
+
+    .gauge-value {
+      position: relative;
+      z-index: 1;
+      color: var(--gauge-color);
+      font-size: clamp(22px, 5vw, 34px);
+      font-weight: 800;
+      letter-spacing: 0;
+      line-height: 1;
+    }
+
+    .gauge-caption {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.25;
+      text-align: center;
+      min-height: 32px;
+    }
+
+    .simple-controls {
+      display: grid;
+      gap: 12px;
+    }
+
+    .device-controls,
+    .mode-controls {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
       gap: 12px;
+    }
+
+    .simple-toggle {
+      min-height: 96px;
+      border: 0;
+      color: #fff;
+      font-size: 22px;
+      font-weight: 760;
+      box-shadow: var(--shadow);
+    }
+
+    .simple-toggle.active {
+      background: var(--blue);
+    }
+
+    .simple-toggle.inactive {
+      background: var(--red);
+    }
+
+    .simple-toggle:disabled {
+      cursor: default;
+      opacity: 0.72;
+    }
+
+    .simple-switch {
+      min-height: 76px;
+      padding: 0 92px 0 16px;
+      border: 1px solid var(--line);
+      color: var(--text);
+      background: var(--panel);
+      font-size: 20px;
+      font-weight: 760;
+      text-align: left;
+      position: relative;
+      box-shadow: var(--shadow);
+    }
+
+    .simple-switch::before {
+      content: "";
+      position: absolute;
+      right: 16px;
+      top: 50%;
+      width: 58px;
+      height: 32px;
+      border-radius: 16px;
+      background: var(--red);
+      transform: translateY(-50%);
+      transition: background 0.16s ease;
+    }
+
+    .simple-switch::after {
+      content: "";
+      position: absolute;
+      right: 42px;
+      top: 50%;
+      width: 24px;
+      height: 24px;
+      border-radius: 50%;
+      background: #fff;
+      transform: translateY(-50%);
+      transition: right 0.16s ease;
+    }
+
+    .simple-switch.active::before {
+      background: var(--blue);
+    }
+
+    .simple-switch.active::after {
+      right: 20px;
+    }
+
+    .simple-sleep-prompt {
+      display: none;
+      grid-template-columns: 1fr auto auto;
+      align-items: center;
+      gap: 8px;
+      min-height: 48px;
+      padding: 10px 12px;
+      border: 1px solid #f2c94c;
+      border-radius: 8px;
+      background: #fff8dd;
+      color: #5f4100;
+      font-size: 14px;
+      font-weight: 700;
+      box-shadow: var(--shadow);
+    }
+
+    .simple-sleep-prompt.visible {
+      display: grid;
+    }
+
+    .simple-sleep-prompt button {
+      min-height: 34px;
+      padding: 0 12px;
+      font-size: 13px;
+    }
+
+    .simple-auto-temp {
+      display: grid;
+      gap: 14px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
+      box-shadow: var(--shadow);
+    }
+
+    .simple-auto-temp .label {
+      margin-bottom: 4px;
+    }
+
+    .temp-slider-row {
+      display: grid;
+      gap: 8px;
+    }
+
+    .slider-head {
+      display: flex;
+      align-items: baseline;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 14px;
+      color: var(--muted);
+      line-height: 1.2;
+    }
+
+    .slider-value {
+      color: var(--text);
+      font-size: 20px;
+      font-weight: 800;
+      letter-spacing: 0;
+      white-space: nowrap;
+    }
+
+    .temp-range {
+      width: 100%;
+      accent-color: var(--blue);
+      cursor: pointer;
+    }
+
+    .simple-auto-temp input[type="number"] {
+      width: 100%;
+      height: 42px;
+      font-size: 18px;
+      font-weight: 760;
+      text-align: center;
+    }
+
+    .simple-auto-temp button {
+      height: 42px;
+      padding: 0 16px;
+      white-space: nowrap;
+    }
+
+    .simple-threshold-summary {
+      color: var(--muted);
+      font-size: 13px;
+      line-height: 1.3;
+    }
+
+    .simple-message {
+      min-height: 42px;
+      padding: 11px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: var(--muted);
+      background: var(--panel);
+      box-shadow: var(--shadow);
     }
 
     .panel {
       background: var(--panel);
       border: 1px solid var(--line);
       border-radius: 8px;
-      padding: 16px;
+      padding: 15px;
+      box-shadow: var(--shadow);
+    }
+
+    .panel:not(.wide) {
+      min-height: 116px;
+      display: flex;
+      flex-direction: column;
+      justify-content: space-between;
     }
 
     .wide {
@@ -258,7 +566,7 @@ INDEX_HTML = """<!doctype html>
     }
 
     .value {
-      font-size: 30px;
+      font-size: 34px;
       font-weight: 700;
       line-height: 1.1;
       letter-spacing: 0;
@@ -268,18 +576,19 @@ INDEX_HTML = """<!doctype html>
       display: flex;
       flex-wrap: wrap;
       gap: 8px;
-      margin-top: 12px;
+      margin-top: 10px;
     }
 
     .pill {
       display: inline-flex;
       align-items: center;
-      min-height: 30px;
-      padding: 5px 9px;
+      min-height: 32px;
+      padding: 5px 10px;
       border-radius: 8px;
       border: 1px solid var(--line);
       font-size: 14px;
       background: #fff;
+      line-height: 1.25;
     }
 
     .on {
@@ -302,15 +611,33 @@ INDEX_HTML = """<!doctype html>
 
     .controls {
       display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 10px;
     }
 
     .thresholds {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
+      grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) 120px;
       gap: 10px;
       align-items: end;
+    }
+
+    .sleep-prompt {
+      display: none;
+      border-color: #b8cafc;
+      background: #f4f7ff;
+      box-shadow: none;
+    }
+
+    .sleep-prompt.visible {
+      display: block;
+    }
+
+    .prompt-actions {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+      margin-top: 12px;
     }
 
     .field span {
@@ -334,6 +661,9 @@ INDEX_HTML = """<!doctype html>
       color: #fff;
       background: var(--blue);
       font-weight: 650;
+      padding: 9px 12px;
+      line-height: 1.25;
+      white-space: normal;
     }
 
     button.secondary {
@@ -356,9 +686,13 @@ INDEX_HTML = """<!doctype html>
 
     .message {
       margin-top: 12px;
+      padding: 10px 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
       color: var(--muted);
       font-size: 14px;
       min-height: 20px;
+      background: var(--panel-soft);
     }
 
     .token-panel {
@@ -366,6 +700,10 @@ INDEX_HTML = """<!doctype html>
       grid-template-columns: 1fr auto;
       gap: 8px;
       margin-bottom: 12px;
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel);
     }
 
     .token-panel.visible {
@@ -377,8 +715,22 @@ INDEX_HTML = """<!doctype html>
       word-break: break-word;
       margin: 0;
       color: var(--muted);
+      padding: 12px;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      background: var(--panel-soft);
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       font-size: 13px;
+    }
+
+    @media (max-width: 900px) {
+      .grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .controls {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
     }
 
     @media (max-width: 680px) {
@@ -389,14 +741,15 @@ INDEX_HTML = """<!doctype html>
       header {
         align-items: flex-start;
         flex-direction: column;
+        gap: 8px;
       }
 
-      .grid, .controls, .thresholds {
+      .controls, .thresholds, .prompt-actions, .mode-controls, .simple-sleep-prompt, .simple-auto-temp {
         grid-template-columns: 1fr;
       }
 
       .value {
-        font-size: 26px;
+        font-size: 30px;
       }
 
       .token-panel {
@@ -408,13 +761,71 @@ INDEX_HTML = """<!doctype html>
 <body>
   <main>
     <header>
-      <h1>Home Control</h1>
       <div class="updated" id="updated">연결 중</div>
     </header>
 
     <section class="token-panel" id="tokenPanel">
       <input id="tokenInput" type="password" autocomplete="current-password" placeholder="CONTROL_TOKEN">
       <button class="secondary" id="saveToken">저장</button>
+    </section>
+
+    <section class="simple">
+      <div class="simple-readout">
+        <div class="readout-item">
+          <div class="label">온도</div>
+          <div class="gauge" id="temperatureGauge">
+            <div class="gauge-value" id="simpleTemperature">--.- C</div>
+          </div>
+          <div class="gauge-caption" id="temperatureCaption">기준 확인 중</div>
+        </div>
+        <div class="readout-item">
+          <div class="label">습도</div>
+          <div class="gauge" id="humidityGauge">
+            <div class="gauge-value" id="simpleHumidity">--.- %</div>
+          </div>
+          <div class="gauge-caption" id="humidityCaption">권장 구간 확인 중</div>
+        </div>
+      </div>
+
+      <div class="simple-controls">
+        <div class="device-controls">
+          <button class="simple-toggle inactive" id="airconToggle" type="button">에어컨 꺼짐</button>
+          <button class="simple-toggle inactive" id="humidifierToggle" type="button">가습기 꺼짐</button>
+        </div>
+        <div class="mode-controls">
+          <button class="simple-switch inactive" id="autoToggle" type="button" role="switch" aria-checked="false">자동제어 OFF</button>
+          <button class="simple-switch inactive" id="sleepToggle" type="button" role="switch" aria-checked="false">수면모드 OFF</button>
+        </div>
+      </div>
+
+      <div class="simple-sleep-prompt" id="simpleSleepPrompt">
+        <div>불이 꺼졌어요. 수면모드로 전환할까요?</div>
+        <button data-command="sleep_on">ON</button>
+        <button class="secondary" data-command="dismiss_sleep_suggestion">나중에</button>
+      </div>
+
+      <div class="simple-message" id="simpleMessage">대기 중</div>
+
+      <div class="simple-auto-temp">
+        <div>
+          <div class="label">자동제어 온도</div>
+          <div class="simple-threshold-summary" id="simpleThresholdSummary">기준 확인 중</div>
+        </div>
+        <div class="temp-slider-row">
+          <div class="slider-head">
+            <span>켜짐 온도</span>
+            <span class="slider-value" id="simpleTempOnValue">--.- C</span>
+          </div>
+          <input class="temp-range" id="simpleTempOnRange" type="range" step="0.5" min="1" max="50">
+        </div>
+        <div class="temp-slider-row">
+          <div class="slider-head">
+            <span>꺼짐 온도</span>
+            <span class="slider-value" id="simpleTempOffValue">--.- C</span>
+          </div>
+          <input class="temp-range" id="simpleTempOffRange" type="range" step="0.5" min="1" max="50">
+        </div>
+      </div>
     </section>
 
     <section class="grid">
@@ -428,14 +839,30 @@ INDEX_HTML = """<!doctype html>
         <div class="value" id="humidity">--.- %</div>
       </article>
 
+      <article class="panel">
+        <div class="label">조도</div>
+        <div class="value" id="lightLevel">---</div>
+      </article>
+
       <article class="panel wide">
         <div class="label">장치 상태</div>
         <div class="status-row">
           <span class="pill" id="presence">재실 --</span>
+          <span class="pill" id="roomLight">방 상태 --</span>
+          <span class="pill" id="sleepMode">수면 --</span>
           <span class="pill" id="aircon">에어컨 --</span>
           <span class="pill" id="humidifier">가습기 --</span>
           <span class="pill" id="autoControl">자동 제어 --</span>
           <span class="pill auto" id="threshold">기준 --</span>
+        </div>
+      </article>
+
+      <article class="panel wide sleep-prompt" id="sleepPrompt">
+        <div class="label">수면모드 제안</div>
+        <div>방이 어두운 상태입니다. 수면모드로 전환할까요?</div>
+        <div class="prompt-actions">
+          <button data-command="sleep_on">수면모드 ON</button>
+          <button class="secondary" data-command="dismiss_sleep_suggestion">나중에</button>
         </div>
       </article>
 
@@ -449,6 +876,8 @@ INDEX_HTML = """<!doctype html>
           <button class="danger" data-command="humidifier_off">가습기 OFF</button>
           <button class="secondary" data-command="auto_on">자동 제어 ON</button>
           <button class="warn" data-command="auto_off">자동 제어 OFF</button>
+          <button class="secondary" data-command="sleep_on">수면모드 ON</button>
+          <button class="warn" data-command="sleep_off">수면모드 OFF</button>
         </div>
         <div class="message" id="message"></div>
       </article>
@@ -490,6 +919,26 @@ INDEX_HTML = """<!doctype html>
     const tempOnInput = document.getElementById("tempOnInput");
     const tempOffInput = document.getElementById("tempOffInput");
     const saveThresholds = document.getElementById("saveThresholds");
+    const simpleMessage = document.getElementById("simpleMessage");
+    const simpleTemperature = document.getElementById("simpleTemperature");
+    const simpleHumidity = document.getElementById("simpleHumidity");
+    const temperatureGauge = document.getElementById("temperatureGauge");
+    const humidityGauge = document.getElementById("humidityGauge");
+    const temperatureCaption = document.getElementById("temperatureCaption");
+    const humidityCaption = document.getElementById("humidityCaption");
+    const airconToggle = document.getElementById("airconToggle");
+    const humidifierToggle = document.getElementById("humidifierToggle");
+    const autoToggle = document.getElementById("autoToggle");
+    const sleepToggle = document.getElementById("sleepToggle");
+    const simpleSleepPrompt = document.getElementById("simpleSleepPrompt");
+    const simpleTempOnRange = document.getElementById("simpleTempOnRange");
+    const simpleTempOffRange = document.getElementById("simpleTempOffRange");
+    const simpleTempOnValue = document.getElementById("simpleTempOnValue");
+    const simpleTempOffValue = document.getElementById("simpleTempOffValue");
+    const simpleThresholdSummary = document.getElementById("simpleThresholdSummary");
+    let currentStatus = null;
+    let simpleThresholdDirty = false;
+    let simpleThresholdSaveTimer = null;
 
     tokenInput.value = controlToken;
     saveToken.addEventListener("click", () => {
@@ -529,6 +978,103 @@ INDEX_HTML = """<!doctype html>
       element.className = `pill ${isOn ? "on" : "off"} ${extraClass}`.trim();
     }
 
+    function setSimpleToggle(button, label, isOn, onText = "켜짐", offText = "꺼짐") {
+      button.textContent = `${label} ${isOn ? onText : offText}`;
+      button.className = `simple-toggle ${isOn ? "active" : "inactive"}`;
+    }
+
+    function setSimpleSwitch(button, label, isOn) {
+      button.textContent = `${label} ${isOn ? "ON" : "OFF"}`;
+      button.className = `simple-switch ${isOn ? "active" : "inactive"}`;
+      button.setAttribute("aria-checked", isOn ? "true" : "false");
+    }
+
+    function clamp(value, min, max) {
+      return Math.max(min, Math.min(max, value));
+    }
+
+    function setGauge(gauge, fill, color) {
+      const angle = clamp(fill, 0, 100) * 1.8;
+      gauge.style.setProperty("--gauge-angle", `${angle}deg`);
+      gauge.style.setProperty("--gauge-color", color);
+    }
+
+    function humidityRangeForTemperature(temperature) {
+      if (temperature === null) {
+        return {min: 40, max: 60};
+      }
+
+      if (temperature < 18) {
+        return {min: 45, max: 60};
+      }
+      if (temperature < 24) {
+        return {min: 40, max: 60};
+      }
+      if (temperature < 27) {
+        return {min: 40, max: 55};
+      }
+      return {min: 35, max: 50};
+    }
+
+    function renderGauges(status) {
+      if (status.temperature === null) {
+        simpleTemperature.textContent = "--.- C";
+        temperatureCaption.textContent = "온도 수신 전";
+        setGauge(temperatureGauge, 0, "#98a2b3");
+      } else {
+        const temp = status.temperature;
+        const tempLimit = status.temp_on;
+        const tempColor = temp >= tempLimit ? "#b42318" : "#16803c";
+        simpleTemperature.textContent = `${temp.toFixed(1)} C`;
+        temperatureCaption.textContent =
+          temp >= tempLimit ? `기준 ${tempLimit.toFixed(1)} C 이상` : `기준 ${tempLimit.toFixed(1)} C 미만`;
+        setGauge(temperatureGauge, (temp / 40) * 100, tempColor);
+      }
+
+      if (status.humidity === null) {
+        simpleHumidity.textContent = "--.- %";
+        humidityCaption.textContent = "습도 수신 전";
+        setGauge(humidityGauge, 0, "#98a2b3");
+        return;
+      }
+
+      const humidity = status.humidity;
+      const range = humidityRangeForTemperature(status.temperature);
+      let humidityColor = "#16803c";
+      let humidityText = `권장 ${range.min}-${range.max}%`;
+
+      if (humidity < range.min) {
+        humidityColor = "#b42318";
+        humidityText = `낮음 / 권장 ${range.min}-${range.max}%`;
+      } else if (humidity > range.max) {
+        humidityColor = "#1f6feb";
+        humidityText = `높음 / 권장 ${range.min}-${range.max}%`;
+      }
+
+      simpleHumidity.textContent = `${humidity.toFixed(1)} %`;
+      humidityCaption.textContent = humidityText;
+      setGauge(humidityGauge, humidity, humidityColor);
+    }
+
+    function renderSimple(status) {
+      currentStatus = status;
+
+      renderGauges(status);
+
+      setSimpleToggle(airconToggle, "에어컨", status.aircon_on);
+      airconToggle.disabled = status.auto_control;
+      airconToggle.title = status.auto_control
+        ? "자동제어 중에는 에어컨 수동 조작이 비활성화됩니다."
+        : "에어컨 버튼을 누릅니다.";
+      setSimpleToggle(humidifierToggle, "가습기", status.humidifier_on);
+      humidifierToggle.disabled = status.auto_control;
+      humidifierToggle.title = status.auto_control
+        ? "자동제어 중에는 가습기 수동 조작이 비활성화됩니다."
+        : "가습기 전원을 전환합니다.";
+      setSimpleSwitch(autoToggle, "자동제어", status.auto_control);
+      setSimpleSwitch(sleepToggle, "수면모드", status.sleep_mode);
+    }
+
     function renderPresence(status) {
       const element = document.getElementById("presence");
 
@@ -559,13 +1105,53 @@ INDEX_HTML = """<!doctype html>
       element.className = "pill auto";
     }
 
+    function renderLight(status) {
+      const lightValue = document.getElementById("lightLevel");
+      const roomLight = document.getElementById("roomLight");
+
+      if (status.light_raw === null) {
+        lightValue.textContent = "---";
+        roomLight.textContent = "조도 수신 전";
+        roomLight.className = "pill";
+        return;
+      }
+
+      lightValue.textContent = `${status.light_raw}`;
+      roomLight.textContent = status.is_dark ? "어두움" : "밝음";
+      roomLight.className = status.is_dark ? "pill off" : "pill on";
+    }
+
+    function renderSleep(status) {
+      const sleepMode = document.getElementById("sleepMode");
+      const sleepPrompt = document.getElementById("sleepPrompt");
+
+      sleepMode.textContent = `수면 ${status.sleep_mode ? "ON" : "OFF"}`;
+      sleepMode.className = status.sleep_mode ? "pill on" : "pill";
+      sleepPrompt.classList.toggle("visible", status.sleep_suggestion_pending && !status.sleep_mode);
+      simpleSleepPrompt.classList.toggle("visible", status.sleep_suggestion_pending && !status.sleep_mode);
+    }
+
+    function syncSimpleThresholdControls(tempOn, tempOff) {
+      const onText = `${tempOn.toFixed(1)} C`;
+      const offText = `${tempOff.toFixed(1)} C`;
+
+      simpleTempOnRange.value = tempOn.toFixed(1);
+      simpleTempOffRange.value = tempOff.toFixed(1);
+      simpleTempOnValue.textContent = onText;
+      simpleTempOffValue.textContent = offText;
+      simpleThresholdSummary.textContent = `켜짐 ${onText} / 꺼짐 ${offText}`;
+    }
+
     function render(status) {
       document.getElementById("temperature").textContent =
         status.temperature === null ? "--.- C" : `${status.temperature.toFixed(1)} C`;
       document.getElementById("humidity").textContent =
         status.humidity === null ? "--.- %" : `${status.humidity.toFixed(1)} %`;
 
+      renderSimple(status);
       renderPresence(status);
+      renderLight(status);
+      renderSleep(status);
       setPill(document.getElementById("aircon"), "에어컨", status.aircon_on);
       setPill(document.getElementById("humidifier"), "가습기", status.humidifier_on);
       setPill(document.getElementById("autoControl"), "자동 제어", status.auto_control, "auto");
@@ -577,6 +1163,9 @@ INDEX_HTML = """<!doctype html>
       }
       if (document.activeElement !== tempOffInput) {
         tempOffInput.value = status.temp_off.toFixed(1);
+      }
+      if (!simpleThresholdDirty) {
+        syncSimpleThresholdControls(status.temp_on, status.temp_off);
       }
 
       document.getElementById("lastLine").textContent = status.last_arduino_line || "없음";
@@ -595,6 +1184,7 @@ INDEX_HTML = """<!doctype html>
 
     async function sendCommand(command) {
       message.textContent = "명령 전송 중";
+      simpleMessage.textContent = "명령 전송 중";
       try {
         const data = await requestJson("/api/command", {
           method: "POST",
@@ -603,8 +1193,10 @@ INDEX_HTML = """<!doctype html>
         });
         render(data.status);
         message.textContent = data.message;
+        simpleMessage.textContent = data.message;
       } catch (error) {
         message.textContent = error.message;
+        simpleMessage.textContent = error.message;
       }
     }
 
@@ -622,15 +1214,104 @@ INDEX_HTML = """<!doctype html>
         });
         render(data.status);
         message.textContent = data.message;
+        simpleMessage.textContent = data.message;
       } catch (error) {
         message.textContent = error.message;
+        simpleMessage.textContent = error.message;
+      }
+    }
+
+    function normalizeSimpleThresholds(changed) {
+      const min = Number(simpleTempOnRange.min);
+      const max = Number(simpleTempOnRange.max);
+      let tempOn = Number(simpleTempOnRange.value);
+      let tempOff = Number(simpleTempOffRange.value);
+
+      if (changed === "on" && tempOn <= tempOff) {
+        tempOff = Math.max(min, tempOn - 0.5);
+        if (tempOn <= tempOff) {
+          tempOn = Math.min(max, tempOff + 0.5);
+        }
+      }
+
+      if (changed === "off" && tempOff >= tempOn) {
+        tempOn = Math.min(max, tempOff + 0.5);
+        if (tempOff >= tempOn) {
+          tempOff = Math.max(min, tempOn - 0.5);
+        }
+      }
+
+      syncSimpleThresholdControls(tempOn, tempOff);
+      return {tempOn, tempOff};
+    }
+
+    function scheduleSimpleThresholdSave(changed) {
+      const thresholds = normalizeSimpleThresholds(changed);
+      simpleThresholdDirty = true;
+      simpleMessage.textContent = "자동제어 온도 조정 중";
+
+      clearTimeout(simpleThresholdSaveTimer);
+      simpleThresholdSaveTimer = setTimeout(() => {
+        saveSimpleThresholdsAuto(thresholds.tempOn, thresholds.tempOff);
+      }, 650);
+    }
+
+    async function saveSimpleThresholdsAuto(tempOn, tempOff) {
+      if (!Number.isFinite(tempOn) || !Number.isFinite(tempOff)) {
+        simpleMessage.textContent = "자동제어 온도를 확인해주세요.";
+        return;
+      }
+
+      message.textContent = "온도 기준 저장 중";
+      simpleMessage.textContent = "온도 기준 저장 중";
+      try {
+        const data = await requestJson("/api/command", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({
+            command: "set_thresholds",
+            temp_on: tempOn,
+            temp_off: tempOff,
+          }),
+        });
+        simpleThresholdDirty = false;
+        render(data.status);
+        message.textContent = data.message;
+        simpleMessage.textContent = data.message;
+      } catch (error) {
+        simpleThresholdDirty = false;
+        message.textContent = error.message;
+        simpleMessage.textContent = error.message;
+        refreshStatus();
       }
     }
 
     document.querySelectorAll("[data-command]").forEach((button) => {
       button.addEventListener("click", () => sendCommand(button.dataset.command));
     });
+    airconToggle.addEventListener("click", () => {
+      if (currentStatus && currentStatus.auto_control) {
+        simpleMessage.textContent = "자동제어 중에는 에어컨 수동 조작이 비활성화됩니다.";
+        return;
+      }
+      sendCommand("aircon_toggle");
+    });
+    humidifierToggle.addEventListener("click", () => {
+      if (currentStatus && currentStatus.auto_control) {
+        simpleMessage.textContent = "자동제어 중에는 가습기 수동 조작이 비활성화됩니다.";
+        return;
+      }
+      sendCommand(currentStatus && currentStatus.humidifier_on ? "humidifier_off" : "humidifier_on");
+    });
+    autoToggle.addEventListener("click", () => {
+      sendCommand(currentStatus && currentStatus.auto_control ? "auto_off" : "auto_on");
+    });
+    sleepToggle.addEventListener("click", () => {
+      sendCommand(currentStatus && currentStatus.sleep_mode ? "sleep_off" : "sleep_on");
+    });
     saveThresholds.addEventListener("click", saveAutoThresholds);
+    simpleTempOnRange.addEventListener("input", () => scheduleSimpleThresholdSave("on"));
+    simpleTempOffRange.addEventListener("input", () => scheduleSimpleThresholdSave("off"));
 
     refreshStatus();
     setInterval(refreshStatus, 3000);
@@ -678,6 +1359,31 @@ def set_auto_control(target_on):
     return f"자동 제어를 {'켰습니다' if target_on else '껐습니다'}."
 
 
+def set_sleep_mode(target_on):
+    with state_lock:
+        state["sleep_mode"] = target_on
+        if target_on:
+            state["auto_control"] = True
+            state["sleep_suggestion_pending"] = False
+            state["sleep_suggestion_ignored_until"] = None
+
+    if target_on:
+        return "수면모드를 켰습니다. 자동제어도 함께 켰습니다."
+
+    return "수면모드를 껐습니다."
+
+
+def dismiss_sleep_suggestion():
+    ignored_until = time.time() + SLEEP_SUGGEST_DISMISS_SECONDS
+
+    with state_lock:
+        state["sleep_suggestion_pending"] = False
+        state["sleep_suggestion_ignored_until"] = ignored_until
+
+    minutes = max(1, int(SLEEP_SUGGEST_DISMISS_SECONDS / 60))
+    return f"수면모드 제안을 {minutes}분 동안 숨깁니다."
+
+
 def parse_threshold(value, label):
     try:
         threshold = float(value)
@@ -717,6 +1423,98 @@ def turn_devices_off_for_away():
         set_humidifier(False)
 
 
+def parse_clock_minutes(value):
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", value.strip())
+    if not match:
+        return None
+
+    hour = int(match.group(1))
+    minute = int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+
+    return hour * 60 + minute
+
+
+def is_in_sleep_suggest_time_window():
+    start = parse_clock_minutes(SLEEP_SUGGEST_START)
+    end = parse_clock_minutes(SLEEP_SUGGEST_END)
+    if start is None or end is None:
+        return True
+
+    now = time.localtime()
+    current = now.tm_hour * 60 + now.tm_min
+
+    if start <= end:
+        return start <= current <= end
+
+    return current >= start or current <= end
+
+
+def calculate_is_dark(light_raw):
+    if LIGHT_DARK_WHEN_LOW:
+        return light_raw <= LIGHT_DARK_THRESHOLD
+
+    return light_raw >= LIGHT_DARK_THRESHOLD
+
+
+def calculate_light_percent(light_raw):
+    light_raw = max(0, min(1023, light_raw))
+    if LIGHT_DARK_WHEN_LOW:
+        return round(light_raw / 1023 * 100, 1)
+
+    return round((1023 - light_raw) / 1023 * 100, 1)
+
+
+def update_sleep_suggestion(now):
+    with state_lock:
+        light_enabled = state["light_sensor_enabled"]
+        is_dark = state["is_dark"]
+        dark_since_at = state["dark_since_at"]
+        sleep_mode = state["sleep_mode"]
+        ignored_until = state["sleep_suggestion_ignored_until"]
+        presence_enabled = state["presence_enabled"]
+        is_home = state["is_home"]
+
+        can_suggest = (
+            light_enabled
+            and is_dark
+            and dark_since_at is not None
+            and not sleep_mode
+            and (ignored_until is None or now >= ignored_until)
+            and (not presence_enabled or is_home)
+        )
+
+        if can_suggest:
+            dark_seconds = now - dark_since_at
+            can_suggest = dark_seconds >= state["sleep_suggest_after_seconds"]
+
+        if can_suggest and is_in_sleep_suggest_time_window():
+            state["sleep_suggestion_pending"] = True
+        elif not is_dark:
+            state["sleep_suggestion_pending"] = False
+
+
+def update_light_state(light_raw):
+    now = time.time()
+    is_dark = calculate_is_dark(light_raw)
+    light_percent = calculate_light_percent(light_raw)
+
+    with state_lock:
+        previous_dark = state["is_dark"]
+        state["light_raw"] = light_raw
+        state["light_level_percent"] = light_percent
+        state["is_dark"] = is_dark
+
+        if is_dark and not previous_dark:
+            state["dark_since_at"] = now
+        elif not is_dark:
+            state["dark_since_at"] = None
+            state["sleep_suggestion_pending"] = False
+
+    update_sleep_suggestion(now)
+
+
 def maybe_auto_control(temperature):
     with state_lock:
         auto_control = state["auto_control"]
@@ -745,6 +1543,7 @@ def handle_arduino_line(line):
 
     temperature = None
     humidity = None
+    light_raw = None
 
     match = re.search(
         r"온도:\s*(-?[0-9]+(?:\.[0-9]+)?)\s*C,\s*습도:\s*([0-9]+(?:\.[0-9]+)?)",
@@ -753,6 +1552,10 @@ def handle_arduino_line(line):
     if match:
         temperature = float(match.group(1))
         humidity = float(match.group(2))
+
+    light_match = re.search(r"조도:\s*([0-9]+)", line)
+    if light_match:
+        light_raw = int(light_match.group(1))
 
     humidifier_match = re.search(r"가습기:\s*(ON|OFF)", line)
 
@@ -766,6 +1569,9 @@ def handle_arduino_line(line):
 
         if humidifier_match:
             state["humidifier_on"] = humidifier_match.group(1) == "ON"
+
+    if light_raw is not None:
+        update_light_state(light_raw)
 
     if temperature is not None:
         maybe_auto_control(temperature)
@@ -944,6 +1750,11 @@ def status_snapshot():
     else:
         snapshot["presence_missing_seconds"] = int(time.time() - snapshot["presence_missing_since"])
 
+    if snapshot["dark_since_at"] is None:
+        snapshot["dark_seconds"] = None
+    else:
+        snapshot["dark_seconds"] = int(time.time() - snapshot["dark_since_at"])
+
     return snapshot
 
 
@@ -954,21 +1765,46 @@ def run_command(payload):
         command = payload
 
     if command == "aircon_on":
+        with state_lock:
+            auto_control = state["auto_control"]
+        if auto_control:
+            return "자동제어 중에는 에어컨 수동 조작이 비활성화됩니다."
         return set_aircon(True)
     if command == "aircon_off":
+        with state_lock:
+            auto_control = state["auto_control"]
+        if auto_control:
+            return "자동제어 중에는 에어컨 수동 조작이 비활성화됩니다."
         return set_aircon(False)
     if command == "aircon_toggle":
         with state_lock:
+            auto_control = state["auto_control"]
+            if auto_control:
+                return "자동제어 중에는 에어컨 수동 조작이 비활성화됩니다."
             target_on = not state["aircon_on"]
         return set_aircon(target_on)
     if command == "humidifier_on":
+        with state_lock:
+            auto_control = state["auto_control"]
+        if auto_control:
+            return "자동제어 중에는 가습기 수동 조작이 비활성화됩니다."
         return set_humidifier(True)
     if command == "humidifier_off":
+        with state_lock:
+            auto_control = state["auto_control"]
+        if auto_control:
+            return "자동제어 중에는 가습기 수동 조작이 비활성화됩니다."
         return set_humidifier(False)
     if command == "auto_on":
         return set_auto_control(True)
     if command == "auto_off":
         return set_auto_control(False)
+    if command == "sleep_on":
+        return set_sleep_mode(True)
+    if command == "sleep_off":
+        return set_sleep_mode(False)
+    if command == "dismiss_sleep_suggestion":
+        return dismiss_sleep_suggestion()
     if command == "set_thresholds":
         if not isinstance(payload, dict):
             raise ValueError("온도 기준 데이터가 필요합니다.")

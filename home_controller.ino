@@ -6,6 +6,7 @@
 
 #define AIRCON_SERVO_PIN 9
 #define HUMIDIFIER_RELAY_PIN 7
+#define LIGHT_SENSOR_PIN A0
 
 // 릴레이 모듈이 LOW일 때 켜지는 타입이면 true, HIGH일 때 켜지는 타입이면 false
 const bool RELAY_ACTIVE_LOW = true;
@@ -46,13 +47,16 @@ void pressAirconButton() {
 void printStatus() {
   float humidity = dht.readHumidity();
   float temperature = dht.readTemperature();
+  int lightRaw = analogRead(LIGHT_SENSOR_PIN);
 
   if (!isnan(humidity) && !isnan(temperature)) {
     Serial.print("온도: ");
     Serial.print(temperature);
     Serial.print(" C, 습도: ");
     Serial.print(humidity);
-    Serial.print(" %, 가습기: ");
+    Serial.print(" %, 조도: ");
+    Serial.print(lightRaw);
+    Serial.print(", 가습기: ");
     Serial.println(humidifierOn ? "ON" : "OFF");
   } else {
     Serial.println("센서 값을 읽을 수 없습니다.");

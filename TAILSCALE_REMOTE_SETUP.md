@@ -147,6 +147,45 @@ export AWAY_AFTER_SECONDS=300
 - 외출로 전환되는 순간 에어컨/가습기 상태를 OFF로 변경
 - 재실 감지가 켜져 있으면 자동 온도 제어는 재실 상태에서만 동작
 
+## 조도센서 기반 수면모드 제안
+
+CdS 아날로그 조도센서 모듈 기준 연결:
+
+```text
+조도센서 VCC  -> Arduino 5V
+조도센서 GND  -> Arduino GND
+조도센서 AO   -> Arduino A0
+```
+
+`home_controller.ino`는 2초마다 온도/습도와 함께 조도 값을 보냅니다.
+
+```text
+온도: 27.00 C, 습도: 39.00 %, 조도: 180, 가습기: OFF
+```
+
+서버 동작:
+
+- 조도 값이 어두움 기준을 넘으면 어두운 상태로 판단
+- 어두운 상태가 일정 시간 유지되면 웹 화면에 수면모드 제안 표시
+- 자동으로 수면모드에 들어가지 않고 사용자가 `수면모드 ON`을 눌러야 전환
+
+기본값:
+
+```bash
+export LIGHT_SENSOR_ENABLED=1
+export LIGHT_DARK_THRESHOLD=250
+export LIGHT_DARK_WHEN_LOW=1
+export SLEEP_SUGGEST_AFTER_SECONDS=300
+export SLEEP_SUGGEST_START=22:00
+export SLEEP_SUGGEST_END=03:00
+```
+
+조도센서 모듈에 따라 밝을 때 값이 커지는 타입이면 아래처럼 바꿉니다.
+
+```bash
+export LIGHT_DARK_WHEN_LOW=0
+```
+
 ## 권장 실행: Tailscale Serve
 
 웹 서버는 라즈베리파이 내부 `127.0.0.1:8000`에만 열고, Tailscale Serve가 Tailnet 안에서 HTTPS로 연결해주는 방식입니다.
@@ -156,6 +195,7 @@ export ARDUINO_PORT=/dev/ttyACM0
 export PHONE_BLUETOOTH_MAC=내휴대폰_MAC
 export PRESENCE_ENABLED=1
 export AWAY_AFTER_SECONDS=300
+export LIGHT_SENSOR_ENABLED=1
 export CONTROL_TOKEN=원하는비밀번호
 python3 home_tailscale_server.py
 ```
@@ -178,6 +218,7 @@ export ARDUINO_PORT=/dev/ttyACM0
 export PHONE_BLUETOOTH_MAC=내휴대폰_MAC
 export PRESENCE_ENABLED=1
 export AWAY_AFTER_SECONDS=300
+export LIGHT_SENSOR_ENABLED=1
 export CONTROL_TOKEN=원하는비밀번호
 python3 home_tailscale_server.py
 ```
@@ -197,11 +238,13 @@ http://라즈베리파이_Tailscale_IP:8000/?token=원하는비밀번호
 ## 웹에서 가능한 기능
 
 - 온도/습도 확인
+- 조도 확인
 - 블루투스 휴대폰 감지 기반 재실/외출 확인
 - 에어컨 ON/OFF
 - 가습기 ON/OFF
 - 온도 자동 제어 ON/OFF
 - 자동 제어 ON/OFF 기준 온도 변경
+- 불이 꺼진 상태가 유지되면 수면모드 전환 제안
 
 ## 주의
 
