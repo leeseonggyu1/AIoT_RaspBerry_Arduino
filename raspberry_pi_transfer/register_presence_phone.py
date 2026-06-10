@@ -150,14 +150,15 @@ def main():
     config = load_config()
     config["presence_enabled"] = True
     config["phone_name_keyword"] = name
-    config.pop("phone_bluetooth_mac", None)
+    config["phone_bluetooth_mac"] = mac
     config.setdefault("away_after_seconds", 300)
 
     save_config(config)
 
     print("\n등록 완료")
     print(f"- 선택한 기기: {name}")
-    print("- 설정 방식: 페어링된 기기 목록에서 이름으로 자동 선택")
+    print(f"- 블루투스 주소: {mac}")
+    print("- 설정 방식: 선택한 페어링 기기에 직접 연결")
     print(f"- 설정 파일: {CONFIG_PATH}")
     print("\n서버를 재시작하면 재실감지가 켜집니다.")
 

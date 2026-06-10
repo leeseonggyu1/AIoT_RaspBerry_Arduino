@@ -194,6 +194,9 @@ state = {
     "phone_bluetooth_mac": PHONE_BLUETOOTH_MAC if has_real_mac(PHONE_BLUETOOTH_MAC) else "",
     "resolved_phone_mac": "",
     "resolved_phone_name": "",
+    "last_bluetooth_target_mac": "",
+    "last_bluetooth_target_name": "",
+    "last_bluetooth_connect_output": "",
     "last_phone_seen_at": None,
     "last_presence_check_at": None,
     "presence_missing_since": None,
@@ -2595,6 +2598,33 @@ def update_resolved_phone(mac="", name=""):
         state["resolved_phone_name"] = name
 
 
+def choose_paired_phone(devices, keyword):
+    normalized_keyword = keyword.lower().strip()
+    exact_matches = [
+        (mac, name)
+        for mac, name in devices
+        if name.lower().strip() == normalized_keyword
+    ]
+    if len(exact_matches) == 1:
+        return exact_matches[0], ""
+    if len(exact_matches) > 1:
+        names = ", ".join(f"{name}({mac})" for mac, name in exact_matches[:5])
+        return None, f"같은 이름의 페어링 기기가 여러 개입니다: {names}"
+
+    partial_matches = [
+        (mac, name)
+        for mac, name in devices
+        if normalized_keyword in name.lower()
+    ]
+    if len(partial_matches) == 1:
+        return partial_matches[0], ""
+    if len(partial_matches) > 1:
+        names = ", ".join(f"{name}({mac})" for mac, name in partial_matches[:5])
+        return None, f"'{keyword}' 이름과 비슷한 페어링 기기가 여러 개입니다: {names}"
+
+    return None, ""
+
+
 def run_bluetoothctl(args, timeout=8):
     result = subprocess.run(
         ["bluetoothctl", *args],
@@ -2629,11 +2659,17 @@ def resolve_paired_phone_by_name():
         return paired_phone_cache["mac"], paired_phone_cache["name"], ""
 
     devices = list_paired_bluetooth_devices()
-    for mac, name in devices:
-        if keyword in name.lower():
-            paired_phone_cache.update({"checked_at": now, "mac": mac, "name": name})
-            update_resolved_phone(mac, name)
-            return mac, name, ""
+    selected, match_error = choose_paired_phone(devices, keyword)
+    if selected:
+        mac, name = selected
+        paired_phone_cache.update({"checked_at": now, "mac": mac, "name": name})
+        update_resolved_phone(mac, name)
+        return mac, name, ""
+
+    if match_error:
+        paired_phone_cache.update({"checked_at": now, "mac": "", "name": ""})
+        update_resolved_phone()
+        return "", "", match_error
 
     paired_phone_cache.update({"checked_at": now, "mac": "", "name": ""})
     update_resolved_phone()
@@ -2661,6 +2697,13 @@ def connect_bluetooth_device(mac):
 def disconnect_bluetooth_device(mac):
     if has_real_mac(mac):
         run_bluetoothctl(["disconnect", mac], timeout=5)
+
+
+def remember_bluetooth_attempt(mac="", name="", output=""):
+    with state_lock:
+        state["last_bluetooth_target_mac"] = mac if has_real_mac(mac) else ""
+        state["last_bluetooth_target_name"] = name
+        state["last_bluetooth_connect_output"] = " ".join(output.split())[-500:]
 
 
 def scan_bluetooth_devices():
@@ -2699,18 +2742,21 @@ def is_phone_detected_by_bluetooth():
 
     mac = PHONE_BLUETOOTH_MAC.lower()
     name = PHONE_NAME_KEYWORD.lower().strip()
+    target_name = PHONE_NAME_KEYWORD.strip()
     paired_error = ""
 
     try:
         if not has_real_mac(mac) and name:
-            mac, _, paired_error = resolve_paired_phone_by_name()
+            mac, target_name, paired_error = resolve_paired_phone_by_name()
 
         if not has_real_mac(mac):
+            remember_bluetooth_attempt("", target_name, paired_error)
             return False, paired_error
 
         disconnect_bluetooth_device(mac)
         time.sleep(0.5)
         connect_output = connect_bluetooth_device(mac)
+        remember_bluetooth_attempt(mac, target_name, connect_output)
     except FileNotFoundError:
         return None, "bluetoothctl을 찾을 수 없습니다. BlueZ 설치가 필요합니다."
     except subprocess.TimeoutExpired:
@@ -2733,13 +2779,9 @@ def update_presence_state(detected, error_message=""):
     transition_message = None
 
     if detected is None:
-        with state_lock:
-            state["last_presence_check_at"] = now
-            state["last_presence_error"] = error_message
-            state["phone_detected"] = False
-            if state["presence_state"] == "unknown":
-                state["presence_state"] = "checking"
-        return
+        detected = False
+        if not error_message:
+            error_message = "재실 확인에 실패했습니다."
 
     with state_lock:
         previous_state = state["presence_state"]
@@ -2760,15 +2802,15 @@ def update_presence_state(detected, error_message=""):
                 state["presence_missing_since"] = now
 
             missing_seconds = now - state["presence_missing_since"]
+            state["is_home"] = False
 
             if missing_seconds >= state["away_after_seconds"]:
                 if previous_state != "away":
                     should_turn_off = True
                     transition_message = "휴대폰 5분 미감지: 외출 상태, 장치 OFF"
 
-                state["is_home"] = False
                 state["presence_state"] = "away"
-            elif state["is_home"]:
+            elif previous_state == "home" or previous_state == "missing":
                 state["presence_state"] = "missing"
             else:
                 state["presence_state"] = "checking"
