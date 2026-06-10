@@ -2457,6 +2457,7 @@ def maybe_auto_control(temperature, humidity=None):
         aircon_on = state["aircon_on"]
         aircon_mode = state["aircon_mode"]
         aircon_target_temp = state["aircon_target_temp"]
+        humidifier_on = state["humidifier_on"]
         temp_on = state["temp_on"]
         temp_off = state["temp_off"]
         presence_enabled = state["presence_enabled"]
@@ -2468,6 +2469,22 @@ def maybe_auto_control(temperature, humidity=None):
     if presence_enabled and not is_home:
         return
 
+    humidity_min, humidity_max = recommended_humidity_range(temperature)
+
+    if humidity is not None:
+        if humidity > humidity_max and humidifier_on:
+            print("Auto control: humidity above recommended range, humidifier off")
+            set_humidifier(False)
+            humidifier_on = False
+        elif humidity < humidity_min and not humidifier_on:
+            print("Auto control: humidity below recommended range, humidifier on")
+            set_humidifier(True)
+            humidifier_on = True
+        elif humidity >= humidity_min and humidifier_on:
+            print("Auto control: humidity back in recommended range, humidifier off")
+            set_humidifier(False)
+            humidifier_on = False
+
     cool_target = clamp_cool_temp(temp_off)
 
     if temperature >= temp_on:
@@ -2475,8 +2492,6 @@ def maybe_auto_control(temperature, humidity=None):
             print(f"Auto control: cooling to {cool_target} C")
             set_aircon_cool(cool_target)
         return
-
-    _, humidity_max = recommended_humidity_range(temperature)
 
     if humidity is not None and humidity > humidity_max:
         if not aircon_on or aircon_mode != "dry":
