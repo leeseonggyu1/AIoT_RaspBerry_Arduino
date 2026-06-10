@@ -9,6 +9,7 @@
 - `home_control_config.json`: 자동제어 온도 기준 설정
 - `requirements.txt`: Python 의존성
 - `run_on_raspberry_pi.sh`: 라즈베리파이 실행 스크립트
+- `register_presence_phone.py`: 블루투스 재실감지 휴대폰 등록 도구
 - `TAILSCALE_REMOTE_SETUP.md`: Tailscale 원격 접속 참고 문서
 
 ## 라즈베리파이에 옮긴 뒤
@@ -52,26 +53,34 @@ ls /dev/ttyACM* /dev/ttyUSB*
 
 ## 블루투스 재실 감지 설정
 
-휴대폰 Bluetooth MAC 또는 이름 키워드를 `home_control_config.json`에 추가하면 됩니다.
+가장 쉬운 방법은 라즈베리파이에서 등록 도구를 실행하는 것입니다.
+
+```bash
+chmod +x register_presence_phone.sh
+./register_presence_phone.sh
+```
+
+등록 도구는 페어링된 블루투스 기기 목록을 보여주고, 선택한 휴대폰 이름을 `home_control_config.json`에 저장합니다. 서버는 이후 MAC 주소를 직접 고정하지 않고 페어링된 기기 목록에서 그 이름을 찾아 재실감지에 사용합니다.
+
+수동으로 설정하려면 `home_control_config.json`에 아래처럼 넣으면 됩니다.
 
 ```json
 {
-  "temp_on": 26.0,
-  "temp_off": 24.0,
   "presence_enabled": true,
-  "phone_bluetooth_mac": "AA:BB:CC:DD:EE:FF",
+  "phone_name_keyword": "Galaxy S25",
   "away_after_seconds": 300
 }
 ```
 
-MAC 주소 대신 이름으로 감지하려면:
+## 현재 하드웨어 기준
 
-```json
-{
-  "presence_enabled": true,
-  "phone_name_keyword": "내폰이름"
-}
-```
+- 에어컨 서보: `D9`
+- 가습기 서보: `D10`
+- 가습기 다이얼 각도: `OFF=0도`, `ON=150도`
+- IR 송신: `D3`
+- IR 수신: `D4`
+- DHT 온습도 센서: `D2`
+- CdS 조도센서: `A0`
 
 ## 주의
 

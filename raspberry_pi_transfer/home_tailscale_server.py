@@ -50,8 +50,14 @@ def save_config(updates):
     config = load_config()
     config.update(updates)
 
-    with open(CONFIG_PATH, "w", encoding="utf-8") as file:
-        json.dump(config, file, ensure_ascii=False, indent=2)
+    try:
+        with open(CONFIG_PATH, "w", encoding="utf-8") as file:
+            json.dump(config, file, ensure_ascii=False, indent=2)
+    except OSError as exc:
+        print(f"설정 파일 저장 실패: {exc}")
+        return False
+
+    return True
 
 
 def env_or_config_float(env_name, config, config_name, default):
@@ -102,11 +108,19 @@ config = load_config()
 TEMP_ON = env_or_config_float("TEMP_ON", config, "temp_on", "26.0")
 TEMP_OFF = env_or_config_float("TEMP_OFF", config, "temp_off", "25.0")
 AUTO_CONTROL_DEFAULT = os.getenv("AUTO_CONTROL", "1").lower() in ("1", "true", "yes", "on")
+MIN_COOL_TEMP = 18
+MAX_COOL_TEMP = 28
 
 PHONE_BLUETOOTH_MAC = normalize_mac(env_or_config_str("PHONE_BLUETOOTH_MAC", config, "phone_bluetooth_mac"))
 PHONE_NAME_KEYWORD = env_or_config_str("PHONE_NAME_KEYWORD", config, "phone_name_keyword")
 BLUETOOTH_SCAN_INTERVAL = env_or_config_int("BLUETOOTH_SCAN_INTERVAL", config, "bluetooth_scan_interval", 30)
 BLUETOOTH_SCAN_SECONDS = env_or_config_int("BLUETOOTH_SCAN_SECONDS", config, "bluetooth_scan_seconds", 8)
+BLUETOOTH_PAIRED_CACHE_SECONDS = env_or_config_int(
+    "BLUETOOTH_PAIRED_CACHE_SECONDS",
+    config,
+    "bluetooth_paired_cache_seconds",
+    120,
+)
 AWAY_AFTER_SECONDS = env_or_config_int("AWAY_AFTER_SECONDS", config, "away_after_seconds", 300)
 PRESENCE_TARGET_CONFIGURED = has_real_mac(PHONE_BLUETOOTH_MAC) or bool(PHONE_NAME_KEYWORD)
 PRESENCE_DEFAULT_ENABLED = platform.system() == "Linux" and PRESENCE_TARGET_CONFIGURED
@@ -138,6 +152,11 @@ HUMIDIFIER_OFF_COMMAND = "HUMIDIFIER_OFF"
 state_lock = threading.Lock()
 serial_lock = threading.Lock()
 stop_event = threading.Event()
+paired_phone_cache = {
+    "checked_at": 0,
+    "mac": "",
+    "name": "",
+}
 
 state = {
     "temperature": None,
@@ -145,6 +164,8 @@ state = {
     "last_sensor_at": None,
     "last_arduino_line": "",
     "aircon_on": False,
+    "aircon_mode": "off",
+    "aircon_target_temp": None,
     "humidifier_on": False,
     "auto_control": AUTO_CONTROL_DEFAULT,
     "temp_on": TEMP_ON,
@@ -153,6 +174,10 @@ state = {
     "presence_state": "unknown" if PRESENCE_ENABLED else "disabled",
     "is_home": False,
     "phone_detected": False,
+    "phone_name_keyword": PHONE_NAME_KEYWORD,
+    "phone_bluetooth_mac": PHONE_BLUETOOTH_MAC if has_real_mac(PHONE_BLUETOOTH_MAC) else "",
+    "resolved_phone_mac": "",
+    "resolved_phone_name": "",
     "last_phone_seen_at": None,
     "last_presence_check_at": None,
     "presence_missing_since": None,
@@ -179,6 +204,9 @@ arduino = None
 class MockArduino:
     def __init__(self):
         self.started_at = time.monotonic()
+        self.aircon_on = False
+        self.aircon_mode = "off"
+        self.aircon_target_temp = None
         self.humidifier_on = False
         self.last_command = "없음"
 
@@ -190,6 +218,20 @@ class MockArduino:
             self.humidifier_on = True
         elif command == HUMIDIFIER_OFF_COMMAND:
             self.humidifier_on = False
+        elif command in ("AC_OFF", "AC_DRY_OFF", "DRY_OFF"):
+            self.aircon_on = False
+            self.aircon_mode = "off"
+            self.aircon_target_temp = None
+        elif command in ("AC_ON_DRY", "ON_DRY"):
+            self.aircon_on = True
+            self.aircon_mode = "dry"
+            self.aircon_target_temp = None
+        else:
+            match = re.fullmatch(r"(?:AC_)?(?:ON|SET)_COOL_(1[8-9]|2[0-8])", command)
+            if match:
+                self.aircon_on = True
+                self.aircon_mode = "cool"
+                self.aircon_target_temp = int(match.group(1))
 
         print(f"Mock Arduino command: {command}")
 
@@ -694,7 +736,7 @@ INDEX_HTML = """<!doctype html>
 
     .auto-preset-drawer {
       display: none;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
+      grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 8px;
       padding: 10px;
       border: 1px solid var(--line);
@@ -740,6 +782,15 @@ INDEX_HTML = """<!doctype html>
       color: #1d4ed8;
     }
 
+    .preset-option.manual {
+      grid-column: 1 / -1;
+    }
+
+    .auto-preset-drawer .simple-auto-temp {
+      grid-column: 1 / -1;
+      margin-top: 2px;
+    }
+
     .simple-sleep-prompt {
       display: none;
       grid-template-columns: 1fr auto auto;
@@ -782,6 +833,40 @@ INDEX_HTML = """<!doctype html>
 
     .simple-auto-temp .label {
       margin-bottom: 4px;
+    }
+
+    .manual-temperature-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px;
+    }
+
+    .temperature-select-row {
+      display: grid;
+      gap: 7px;
+    }
+
+    .temperature-select-row span {
+      color: var(--muted);
+      font-size: 13px;
+      font-weight: 750;
+    }
+
+    .temp-select {
+      height: 46px;
+      padding: 0 12px;
+      color: var(--text);
+      background: #fff;
+      font-size: 17px;
+      font-weight: 850;
+      cursor: pointer;
+    }
+
+    .manual-hint {
+      color: var(--muted);
+      font-size: 12px;
+      font-weight: 650;
+      line-height: 1.35;
     }
 
     .temp-slider-row {
@@ -989,7 +1074,7 @@ INDEX_HTML = """<!doctype html>
       margin-bottom: 6px;
     }
 
-    button, input {
+    button, input, select {
       width: 100%;
       min-height: 44px;
       border-radius: 8px;
@@ -1015,7 +1100,8 @@ INDEX_HTML = """<!doctype html>
     }
 
     button:focus-visible,
-    input:focus-visible {
+    input:focus-visible,
+    select:focus-visible {
       outline: 3px solid rgba(37, 99, 235, 0.18);
       outline-offset: 2px;
     }
@@ -1033,7 +1119,7 @@ INDEX_HTML = """<!doctype html>
       background: var(--red);
     }
 
-    input {
+    input, select {
       padding: 0 12px;
       background: #fff;
     }
@@ -1098,7 +1184,7 @@ INDEX_HTML = """<!doctype html>
         gap: 8px;
       }
 
-      .controls, .thresholds, .prompt-actions, .auto-preset-drawer, .simple-sleep-prompt, .simple-auto-temp {
+      .controls, .thresholds, .prompt-actions, .auto-preset-drawer, .simple-sleep-prompt, .simple-auto-temp, .manual-temperature-grid {
         grid-template-columns: 1fr;
       }
 
@@ -1183,10 +1269,27 @@ INDEX_HTML = """<!doctype html>
           <span>시원하게</span>
           <small>켜짐 24.0 C / 꺼짐 22.0 C</small>
         </button>
-        <button class="preset-option" type="button" data-auto-preset="manual">
+        <button class="preset-option manual" type="button" data-auto-preset="manual">
           <span>수동조절</span>
-          <small>직접 슬라이더 조정</small>
+          <small>켜짐/꺼짐 온도 직접 선택</small>
         </button>
+        <div class="simple-auto-temp" id="simpleAutoTemp">
+          <div>
+            <div class="label">자동제어 온도</div>
+            <div class="simple-threshold-summary" id="simpleThresholdSummary">기준 확인 중</div>
+          </div>
+          <div class="manual-temperature-grid">
+            <label class="temperature-select-row">
+              <span>켜짐 온도</span>
+              <select class="temp-select" id="simpleTempOnSelect" aria-label="자동제어 켜짐 온도"></select>
+            </label>
+            <label class="temperature-select-row">
+              <span>꺼짐 온도</span>
+              <select class="temp-select" id="simpleTempOffSelect" aria-label="자동제어 꺼짐 온도"></select>
+            </label>
+          </div>
+          <div class="manual-hint">에어컨을 직접 켤 때도 이 꺼짐 온도를 목표 온도로 사용합니다.</div>
+        </div>
       </div>
 
       <div class="simple-sleep-prompt" id="simpleSleepPrompt">
@@ -1196,27 +1299,6 @@ INDEX_HTML = """<!doctype html>
       </div>
 
       <div class="simple-message" id="simpleMessage">대기 중</div>
-
-      <div class="simple-auto-temp" id="simpleAutoTemp">
-        <div>
-          <div class="label">자동제어 온도</div>
-          <div class="simple-threshold-summary" id="simpleThresholdSummary">기준 확인 중</div>
-        </div>
-        <div class="temp-slider-row">
-          <div class="slider-head">
-            <span>켜짐 온도</span>
-            <span class="slider-value" id="simpleTempOnValue">--.- C</span>
-          </div>
-          <input class="temp-range" id="simpleTempOnRange" type="range" step="0.5" min="1" max="50">
-        </div>
-        <div class="temp-slider-row">
-          <div class="slider-head">
-            <span>꺼짐 온도</span>
-            <span class="slider-value" id="simpleTempOffValue">--.- C</span>
-          </div>
-          <input class="temp-range" id="simpleTempOffRange" type="range" step="0.5" min="1" max="50">
-        </div>
-      </div>
     </section>
 
     <section class="grid">
@@ -1328,10 +1410,8 @@ INDEX_HTML = """<!doctype html>
     const sleepToggle = document.getElementById("sleepToggle");
     const simpleSleepPrompt = document.getElementById("simpleSleepPrompt");
     const simpleAutoTemp = document.getElementById("simpleAutoTemp");
-    const simpleTempOnRange = document.getElementById("simpleTempOnRange");
-    const simpleTempOffRange = document.getElementById("simpleTempOffRange");
-    const simpleTempOnValue = document.getElementById("simpleTempOnValue");
-    const simpleTempOffValue = document.getElementById("simpleTempOffValue");
+    const simpleTempOnSelect = document.getElementById("simpleTempOnSelect");
+    const simpleTempOffSelect = document.getElementById("simpleTempOffSelect");
     const simpleThresholdSummary = document.getElementById("simpleThresholdSummary");
     const AUTO_PRESETS = {
       warm: {label: "따뜻하게", tempOn: 29.0, tempOff: 27.0},
@@ -1344,6 +1424,23 @@ INDEX_HTML = """<!doctype html>
     let simpleThresholdSaveTimer = null;
     let autoPresetMode = localStorage.getItem("autoPresetMode") || "comfort";
     let autoPresetDrawerOpen = false;
+
+    function formatTempOption(value) {
+      return value.toFixed(1);
+    }
+
+    function populateTemperatureSelect(select) {
+      for (let temp = 18; temp <= 32; temp += 0.5) {
+        const value = formatTempOption(temp);
+        const option = document.createElement("option");
+        option.value = value;
+        option.textContent = `${value} C`;
+        select.appendChild(option);
+      }
+    }
+
+    populateTemperatureSelect(simpleTempOnSelect);
+    populateTemperatureSelect(simpleTempOffSelect);
 
     tokenInput.value = controlToken;
     saveToken.addEventListener("click", () => {
@@ -1437,7 +1534,7 @@ INDEX_HTML = """<!doctype html>
       autoPresetDrawer.classList.toggle("visible", autoPresetDrawerOpen);
       autoPresetToggle.classList.toggle("open", autoPresetDrawerOpen);
       autoPresetToggle.setAttribute("aria-expanded", autoPresetDrawerOpen ? "true" : "false");
-      simpleAutoTemp.classList.toggle("visible", autoPresetMode === "manual");
+      simpleAutoTemp.classList.toggle("visible", autoPresetDrawerOpen && autoPresetMode === "manual");
 
       autoPresetButtons.forEach((button) => {
         button.classList.toggle("active", button.dataset.autoPreset === autoPresetMode);
@@ -1469,6 +1566,22 @@ INDEX_HTML = """<!doctype html>
         return {min: 40, max: 55};
       }
       return {min: 35, max: 50};
+    }
+
+    function airconStatusText(status) {
+      if (!status.aircon_on || status.aircon_mode === "off") {
+        return "꺼짐";
+      }
+
+      if (status.aircon_mode === "dry") {
+        return "제습 중";
+      }
+
+      if (status.aircon_mode === "cool" && status.aircon_target_temp !== null) {
+        return `냉방 ${status.aircon_target_temp}도`;
+      }
+
+      return "켜짐";
     }
 
     function renderGauges(status) {
@@ -1526,11 +1639,16 @@ INDEX_HTML = """<!doctype html>
 
       renderGauges(status);
 
-      setSimpleToggle(airconToggle, "에어컨", status.aircon_on);
       airconToggle.disabled = status.auto_control;
       airconToggle.title = status.auto_control
         ? "자동제어 중에는 에어컨 수동 조작이 비활성화됩니다."
-        : "에어컨 버튼을 누릅니다.";
+        : `에어컨을 켤 때 ${status.temp_off.toFixed(1)} C를 목표 온도로 사용합니다.`;
+      const airconModeText = status.aircon_mode === "dry"
+        ? "제습"
+        : status.aircon_target_temp !== null
+          ? `${status.aircon_target_temp}도`
+          : "켜짐";
+      setSimpleToggle(airconToggle, "에어컨", status.aircon_on, airconModeText, "꺼짐");
       setSimpleToggle(humidifierToggle, "가습기", status.humidifier_on);
       humidifierToggle.disabled = status.auto_control;
       humidifierToggle.title = status.auto_control
@@ -1610,10 +1728,8 @@ INDEX_HTML = """<!doctype html>
       const onText = `${tempOn.toFixed(1)} C`;
       const offText = `${tempOff.toFixed(1)} C`;
 
-      simpleTempOnRange.value = tempOn.toFixed(1);
-      simpleTempOffRange.value = tempOff.toFixed(1);
-      simpleTempOnValue.textContent = onText;
-      simpleTempOffValue.textContent = offText;
+      simpleTempOnSelect.value = tempOn.toFixed(1);
+      simpleTempOffSelect.value = tempOff.toFixed(1);
       simpleThresholdSummary.textContent = `켜짐 ${onText} / 꺼짐 ${offText}`;
     }
 
@@ -1658,14 +1774,14 @@ INDEX_HTML = """<!doctype html>
       }
     }
 
-    async function sendCommand(command) {
+    async function sendCommandPayload(command, payload = {}) {
       message.textContent = "명령 전송 중";
       simpleMessage.textContent = "명령 전송 중";
       try {
         const data = await requestJson("/api/command", {
           method: "POST",
           headers: {"Content-Type": "application/json"},
-          body: JSON.stringify({command}),
+          body: JSON.stringify({command, ...payload}),
         });
         render(data.status);
         message.textContent = data.message;
@@ -1674,6 +1790,10 @@ INDEX_HTML = """<!doctype html>
         message.textContent = error.message;
         simpleMessage.textContent = error.message;
       }
+    }
+
+    async function sendCommand(command) {
+      return sendCommandPayload(command);
     }
 
     async function saveAutoThresholds() {
@@ -1698,10 +1818,10 @@ INDEX_HTML = """<!doctype html>
     }
 
     function normalizeSimpleThresholds(changed) {
-      const min = Number(simpleTempOnRange.min);
-      const max = Number(simpleTempOnRange.max);
-      let tempOn = Number(simpleTempOnRange.value);
-      let tempOff = Number(simpleTempOffRange.value);
+      const min = 18;
+      const max = 32;
+      let tempOn = Number(simpleTempOnSelect.value);
+      let tempOff = Number(simpleTempOffSelect.value);
 
       if (changed === "on" && tempOn <= tempOff) {
         tempOff = Math.max(min, tempOn - 0.5);
@@ -1777,14 +1897,15 @@ INDEX_HTML = """<!doctype html>
 
       autoPresetMode = mode;
       localStorage.setItem("autoPresetMode", autoPresetMode);
-      setAutoPresetDrawer(false);
 
       if (mode === "manual") {
+        setAutoPresetDrawer(true);
         simpleMessage.textContent = "수동조절 모드입니다.";
         updateAutoPresetUi();
         return;
       }
 
+      setAutoPresetDrawer(false);
       const preset = AUTO_PRESETS[mode];
       simpleMessage.textContent = `${preset.label} 모드 적용 중`;
       await saveSimpleThresholdsAuto(preset.tempOn, preset.tempOff);
@@ -1798,7 +1919,14 @@ INDEX_HTML = """<!doctype html>
         simpleMessage.textContent = "자동제어 중에는 에어컨 수동 조작이 비활성화됩니다.";
         return;
       }
-      sendCommand("aircon_toggle");
+
+      if (currentStatus && currentStatus.aircon_on) {
+        sendCommand("aircon_off");
+        return;
+      }
+
+      const targetTemp = currentStatus ? currentStatus.temp_off : Number(simpleTempOffSelect.value);
+      sendCommandPayload("set_aircon_temperature", {temperature: targetTemp});
     });
     humidifierToggle.addEventListener("click", () => {
       if (currentStatus && currentStatus.auto_control) {
@@ -1820,8 +1948,8 @@ INDEX_HTML = """<!doctype html>
       sendCommand(currentStatus && currentStatus.sleep_mode ? "sleep_off" : "sleep_on");
     });
     saveThresholds.addEventListener("click", saveAutoThresholds);
-    simpleTempOnRange.addEventListener("input", () => scheduleSimpleThresholdSave("on"));
-    simpleTempOffRange.addEventListener("input", () => scheduleSimpleThresholdSave("off"));
+    simpleTempOnSelect.addEventListener("change", () => scheduleSimpleThresholdSave("on"));
+    simpleTempOffSelect.addEventListener("change", () => scheduleSimpleThresholdSave("off"));
 
     refreshStatus();
     setInterval(refreshStatus, 3000);
@@ -1837,7 +1965,69 @@ def send_arduino_command(command):
         arduino.flush()
 
 
-def set_aircon(target_on):
+def clamp_cool_temp(value):
+    try:
+        temperature = int(round(float(value)))
+    except (TypeError, ValueError):
+        temperature = int(round(TEMP_OFF))
+
+    return max(MIN_COOL_TEMP, min(MAX_COOL_TEMP, temperature))
+
+
+def auto_cool_target_temp():
+    with state_lock:
+        return clamp_cool_temp(state["temp_off"])
+
+
+def set_aircon_state(is_on, mode="off", target_temp=None):
+    with state_lock:
+        state["aircon_on"] = is_on
+        state["aircon_mode"] = mode if is_on else "off"
+        state["aircon_target_temp"] = target_temp if is_on else None
+
+
+def set_aircon_cool(target_temp=None):
+    target_temp = clamp_cool_temp(target_temp if target_temp is not None else auto_cool_target_temp())
+
+    with state_lock:
+        current_on = state["aircon_on"]
+        current_mode = state["aircon_mode"]
+        current_target_temp = state["aircon_target_temp"]
+
+    if current_on and current_mode == "cool" and current_target_temp == target_temp:
+        return f"Aircon is already cooling at {target_temp} C."
+
+    if current_on and current_mode == "cool":
+        command = f"AC_SET_COOL_{target_temp}"
+    else:
+        if current_on:
+            set_aircon(False)
+            time.sleep(1)
+        command = f"AC_ON_COOL_{target_temp}"
+
+    send_arduino_command(command)
+    set_aircon_state(True, "cool", target_temp)
+    return f"Aircon cooling command sent: {target_temp} C."
+
+
+def set_aircon_dry():
+    with state_lock:
+        current_on = state["aircon_on"]
+        current_mode = state["aircon_mode"]
+
+    if current_on and current_mode == "dry":
+        return "Aircon is already in dry mode."
+
+    if current_on:
+        set_aircon(False)
+        time.sleep(1)
+
+    send_arduino_command("AC_ON_DRY")
+    set_aircon_state(True, "dry", None)
+    return "Aircon dry mode command sent."
+
+
+def legacy_set_aircon_toggle(target_on):
     with state_lock:
         current_on = state["aircon_on"]
 
@@ -1850,6 +2040,24 @@ def set_aircon(target_on):
         state["aircon_on"] = target_on
 
     return f"에어컨 {'ON' if target_on else 'OFF'} 명령을 보냈습니다."
+
+
+def set_aircon(target_on):
+    with state_lock:
+        current_on = state["aircon_on"]
+        current_mode = state["aircon_mode"]
+
+    if current_on == target_on:
+        return f"Aircon is already {'ON' if target_on else 'OFF'}."
+
+    if target_on:
+        return set_aircon_cool(auto_cool_target_temp())
+
+    command = "AC_DRY_OFF" if current_mode == "dry" else "AC_OFF"
+    send_arduino_command(command)
+    set_aircon_state(False)
+
+    return "Aircon OFF command sent."
 
 
 def set_humidifier(target_on):
@@ -1917,8 +2125,10 @@ def set_auto_thresholds(temp_on, temp_off):
         state["temp_on"] = temp_on
         state["temp_off"] = temp_off
 
-    save_config({"temp_on": temp_on, "temp_off": temp_off})
-    return f"자동 제어 기준을 ON {temp_on:.1f} C / OFF {temp_off:.1f} C로 저장했습니다."
+    if save_config({"temp_on": temp_on, "temp_off": temp_off}):
+        return f"자동 제어 기준을 ON {temp_on:.1f} C / OFF {temp_off:.1f} C로 저장했습니다."
+
+    return f"자동 제어 기준을 ON {temp_on:.1f} C / OFF {temp_off:.1f} C로 이번 실행에 적용했습니다."
 
 
 def turn_devices_off_for_away():
@@ -2025,7 +2235,7 @@ def update_light_state(light_raw):
     update_sleep_suggestion(now)
 
 
-def maybe_auto_control(temperature):
+def legacy_maybe_auto_control(temperature):
     with state_lock:
         auto_control = state["auto_control"]
         aircon_on = state["aircon_on"]
@@ -2045,6 +2255,63 @@ def maybe_auto_control(temperature):
         set_aircon(True)
     elif temperature <= temp_off and aircon_on:
         print("자동 제어: 온도가 낮아져 에어컨 OFF")
+        set_aircon(False)
+
+
+def recommended_humidity_range(temperature):
+    if temperature is None:
+        return 40, 60
+
+    if temperature < 18:
+        return 45, 60
+    if temperature < 24:
+        return 40, 60
+    if temperature < 27:
+        return 40, 55
+    return 35, 50
+
+
+def maybe_auto_control(temperature, humidity=None):
+    with state_lock:
+        auto_control = state["auto_control"]
+        aircon_on = state["aircon_on"]
+        aircon_mode = state["aircon_mode"]
+        aircon_target_temp = state["aircon_target_temp"]
+        temp_on = state["temp_on"]
+        temp_off = state["temp_off"]
+        presence_enabled = state["presence_enabled"]
+        is_home = state["is_home"]
+
+    if not auto_control:
+        return
+
+    if presence_enabled and not is_home:
+        return
+
+    cool_target = clamp_cool_temp(temp_off)
+
+    if temperature >= temp_on:
+        if not aircon_on or aircon_mode != "cool" or aircon_target_temp != cool_target:
+            print(f"Auto control: cooling to {cool_target} C")
+            set_aircon_cool(cool_target)
+        return
+
+    _, humidity_max = recommended_humidity_range(temperature)
+
+    if humidity is not None and humidity > humidity_max:
+        if not aircon_on or aircon_mode != "dry":
+            print("Auto control: humidity above recommended range, dry mode on")
+            set_aircon_dry()
+        return
+
+    if not aircon_on:
+        return
+
+    if aircon_mode == "cool" and temperature <= temp_off:
+        print("Auto control: temperature low enough, aircon off")
+        set_aircon(False)
+    elif aircon_mode == "dry" and humidity is not None and humidity <= humidity_max:
+        print("Auto control: humidity back in recommended range, dry mode off")
         set_aircon(False)
 
 
@@ -2084,7 +2351,7 @@ def handle_arduino_line(line):
         update_light_state(light_raw)
 
     if temperature is not None:
-        maybe_auto_control(temperature)
+        maybe_auto_control(temperature, humidity)
 
 
 def serial_reader():
@@ -2100,18 +2367,78 @@ def serial_reader():
             handle_arduino_line(line)
 
 
-def run_bluetoothctl_info():
-    if not has_real_mac(PHONE_BLUETOOTH_MAC):
-        return ""
+def parse_bluetooth_devices(output):
+    devices = []
 
+    for line in output.splitlines():
+        match = re.match(r"^\s*Device\s+([0-9a-fA-F:]{17})\s+(.+?)\s*$", line)
+        if match:
+            devices.append((normalize_mac(match.group(1)), match.group(2).strip()))
+
+    return devices
+
+
+def update_resolved_phone(mac="", name=""):
+    with state_lock:
+        state["resolved_phone_mac"] = mac
+        state["resolved_phone_name"] = name
+
+
+def run_bluetoothctl(args, timeout=8):
     result = subprocess.run(
-        ["bluetoothctl", "info", PHONE_BLUETOOTH_MAC],
+        ["bluetoothctl", *args],
         capture_output=True,
         text=True,
-        timeout=8,
+        timeout=timeout,
         check=False,
     )
     return f"{result.stdout}\n{result.stderr}"
+
+
+def list_paired_bluetooth_devices():
+    output = run_bluetoothctl(["paired-devices"])
+    devices = parse_bluetooth_devices(output)
+
+    if devices:
+        return devices
+
+    # Newer BlueZ versions also support this form.
+    output = run_bluetoothctl(["devices", "Paired"])
+    return parse_bluetooth_devices(output)
+
+
+def resolve_paired_phone_by_name():
+    keyword = PHONE_NAME_KEYWORD.lower().strip()
+    if not keyword:
+        update_resolved_phone()
+        return "", "", ""
+
+    now = time.time()
+    if now - paired_phone_cache["checked_at"] < BLUETOOTH_PAIRED_CACHE_SECONDS:
+        return paired_phone_cache["mac"], paired_phone_cache["name"], ""
+
+    devices = list_paired_bluetooth_devices()
+    for mac, name in devices:
+        if keyword in name.lower():
+            paired_phone_cache.update({"checked_at": now, "mac": mac, "name": name})
+            update_resolved_phone(mac, name)
+            return mac, name, ""
+
+    paired_phone_cache.update({"checked_at": now, "mac": "", "name": ""})
+    update_resolved_phone()
+
+    if devices:
+        names = ", ".join(name for _, name in devices[:5])
+        return "", "", f"페어링된 기기에서 '{PHONE_NAME_KEYWORD}' 이름을 찾지 못했습니다. 현재 목록: {names}"
+
+    return "", "", "페어링된 블루투스 기기가 없습니다. 먼저 휴대폰을 pair/trust 해주세요."
+
+
+def run_bluetoothctl_info(mac):
+    if not has_real_mac(mac):
+        return ""
+
+    return run_bluetoothctl(["info", mac])
 
 
 def scan_bluetooth_devices():
@@ -2148,11 +2475,16 @@ def is_phone_detected_by_bluetooth():
 
     mac = PHONE_BLUETOOTH_MAC.lower()
     name = PHONE_NAME_KEYWORD.lower().strip()
+    paired_error = ""
 
     try:
-        info_output = run_bluetoothctl_info().lower()
-        if "connected: yes" in info_output:
-            return True, ""
+        if not has_real_mac(mac) and name:
+            mac, _, paired_error = resolve_paired_phone_by_name()
+
+        if has_real_mac(mac):
+            info_output = run_bluetoothctl_info(mac).lower()
+            if "connected: yes" in info_output:
+                return True, ""
 
         scan_output = scan_bluetooth_devices().lower()
     except FileNotFoundError:
@@ -2168,7 +2500,7 @@ def is_phone_detected_by_bluetooth():
     if name and name in scan_output:
         return True, ""
 
-    return False, ""
+    return False, paired_error
 
 
 def update_presence_state(detected, error_message=""):
@@ -2293,6 +2625,27 @@ def run_command(payload):
                 return "자동제어 중에는 에어컨 수동 조작이 비활성화됩니다."
             target_on = not state["aircon_on"]
         return set_aircon(target_on)
+    cool_match = re.fullmatch(r"aircon_cool_(1[8-9]|2[0-8])", command)
+    if cool_match:
+        with state_lock:
+            auto_control = state["auto_control"]
+        if auto_control:
+            return "Manual aircon control is disabled while auto control is ON."
+        return set_aircon_cool(int(cool_match.group(1)))
+    if command == "set_aircon_temperature":
+        with state_lock:
+            auto_control = state["auto_control"]
+        if auto_control:
+            return "Manual aircon control is disabled while auto control is ON."
+        if not isinstance(payload, dict):
+            raise ValueError("temperature is required.")
+        return set_aircon_cool(payload.get("temperature"))
+    if command == "aircon_dry_on":
+        with state_lock:
+            auto_control = state["auto_control"]
+        if auto_control:
+            return "Manual aircon control is disabled while auto control is ON."
+        return set_aircon_dry()
     if command == "humidifier_on":
         with state_lock:
             auto_control = state["auto_control"]

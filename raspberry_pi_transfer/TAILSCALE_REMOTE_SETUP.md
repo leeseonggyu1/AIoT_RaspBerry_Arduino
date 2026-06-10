@@ -3,7 +3,7 @@
 ## 구조
 
 - 라즈베리파이: 집 Wi-Fi에 연결, Tailscale 로그인, `home_tailscale_server.py` 실행
-- 아두이노: `home_controller.ino` 업로드, DHT 센서/서보모터/가습기 릴레이 제어
+- 아두이노: `home_controller.ino` 업로드, DHT 센서/에어컨 서보모터/가습기 다이얼 서보모터 제어
 - 휴대폰: Tailscale 앱 로그인 후 브라우저로 라즈베리파이 접속
 
 ## 노트북에서 먼저 검증하기
@@ -246,11 +246,23 @@ http://라즈베리파이_Tailscale_IP:8000/?token=원하는비밀번호
 - 자동 제어 ON/OFF 기준 온도 변경
 - 불이 꺼진 상태가 유지되면 수면모드 전환 제안
 
+## 블루투스 재실감지 쉽게 등록
+
+라즈베리파이에 옮긴 뒤 아래 명령을 실행하면 됩니다.
+
+```bash
+cd ~/raspberry_pi_transfer
+chmod +x register_presence_phone.sh
+./register_presence_phone.sh
+```
+
+목록에서 휴대폰을 번호로 선택하면 `home_control_config.json`에 `presence_enabled=true`, `phone_name_keyword=선택한 휴대폰 이름`이 저장됩니다. 서버는 MAC 주소를 고정하지 않고, 페어링된 기기 목록에서 그 이름을 찾아 현재 연결/감지 여부를 확인합니다.
+
 ## 주의
 
 - `CONTROL_TOKEN`은 꼭 설정하는 것을 권장합니다.
 - 화면에서 변경한 자동 제어 온도는 `home_control_config.json`에 저장됩니다.
 - 휴대폰 기종에 따라 일반 블루투스 검색에 항상 나타나지 않을 수 있습니다. 이 경우 페어링 후 `trust` 처리하고, 휴대폰 블루투스가 켜져 있는지 확인하세요.
 - 에어컨은 현재 서보모터로 버튼을 누르는 방식이라 실제 상태와 코드의 기억 상태가 어긋날 수 있습니다.
-- 가습기는 릴레이 모듈에 연결되어 있어야 실제 ON/OFF가 됩니다.
-- 릴레이가 반대로 동작하면 `home_controller.ino`의 `RELAY_ACTIVE_LOW` 값을 `false`로 바꾸세요.
+- 가습기는 `D10` 서보모터가 다이얼을 돌려서 실제 ON/OFF 위치로 이동합니다. 현재 기준은 `OFF=0도`, `ON=150도`입니다.
+- 다이얼 위치가 맞지 않으면 `home_controller.ino`의 `HUMIDIFIER_OFF_ANGLE`, `HUMIDIFIER_ON_ANGLE` 값을 조정하세요.

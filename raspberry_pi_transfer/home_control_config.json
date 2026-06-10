@@ -1,4 +1,5 @@
 {
   "temp_on": 26.0,
-  "temp_off": 24.0
+  "temp_off": 24.0,
+  "light_dark_threshold": 150
 }
