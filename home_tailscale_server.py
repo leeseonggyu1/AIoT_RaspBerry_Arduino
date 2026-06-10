@@ -196,7 +196,9 @@ state = {
     "resolved_phone_name": "",
     "last_bluetooth_target_mac": "",
     "last_bluetooth_target_name": "",
+    "last_bluetooth_disconnect_output": "",
     "last_bluetooth_connect_output": "",
+    "last_bluetooth_info_output": "",
     "last_phone_seen_at": None,
     "last_presence_check_at": None,
     "presence_missing_since": None,
@@ -2686,6 +2688,17 @@ def bluetooth_connect_succeeded(output):
     return "connection successful" in output_lower
 
 
+def bluetooth_info_connected(output):
+    return bool(re.search(r"^\s*Connected:\s*yes\s*$", output, re.IGNORECASE | re.MULTILINE))
+
+
+def run_bluetoothctl_info(mac):
+    if not has_real_mac(mac):
+        return ""
+
+    return run_bluetoothctl(["info", mac], timeout=5)
+
+
 def connect_bluetooth_device(mac):
     if not has_real_mac(mac):
         return ""
@@ -2696,14 +2709,18 @@ def connect_bluetooth_device(mac):
 
 def disconnect_bluetooth_device(mac):
     if has_real_mac(mac):
-        run_bluetoothctl(["disconnect", mac], timeout=5)
+        return run_bluetoothctl(["disconnect", mac], timeout=5)
+
+    return ""
 
 
-def remember_bluetooth_attempt(mac="", name="", output=""):
+def remember_bluetooth_attempt(mac="", name="", connect_output="", disconnect_output="", info_output=""):
     with state_lock:
         state["last_bluetooth_target_mac"] = mac if has_real_mac(mac) else ""
         state["last_bluetooth_target_name"] = name
-        state["last_bluetooth_connect_output"] = " ".join(output.split())[-500:]
+        state["last_bluetooth_disconnect_output"] = " ".join(disconnect_output.split())[-500:]
+        state["last_bluetooth_connect_output"] = " ".join(connect_output.split())[-500:]
+        state["last_bluetooth_info_output"] = " ".join(info_output.split())[-500:]
 
 
 def scan_bluetooth_devices():
@@ -2741,22 +2758,51 @@ def is_phone_detected_by_bluetooth():
         return None, "블루투스 재실 감지는 라즈베리파이 Linux에서 활성화됩니다."
 
     mac = PHONE_BLUETOOTH_MAC.lower()
-    name = PHONE_NAME_KEYWORD.lower().strip()
     target_name = PHONE_NAME_KEYWORD.strip()
-    paired_error = ""
 
     try:
-        if not has_real_mac(mac) and name:
-            mac, target_name, paired_error = resolve_paired_phone_by_name()
-
         if not has_real_mac(mac):
-            remember_bluetooth_attempt("", target_name, paired_error)
-            return False, paired_error
+            error = "휴대폰 블루투스 MAC이 저장되어 있지 않습니다. register_presence_phone.sh로 휴대폰을 다시 등록하세요."
+            remember_bluetooth_attempt("", target_name, info_output=error)
+            return False, error
 
-        disconnect_bluetooth_device(mac)
-        time.sleep(0.5)
+        resolved_name = ""
+        for paired_mac, paired_name in list_paired_bluetooth_devices():
+            if paired_mac == mac:
+                resolved_name = paired_name
+                break
+
+        if target_name and resolved_name and target_name.lower() != resolved_name.lower():
+            error = f"등록된 MAC의 이름이 다릅니다: 설정={target_name}, 실제={resolved_name}"
+            remember_bluetooth_attempt(mac, resolved_name, info_output=error)
+            return False, error
+
+        if resolved_name:
+            update_resolved_phone(mac, resolved_name)
+            target_name = resolved_name
+
+        disconnect_output = disconnect_bluetooth_device(mac)
+        time.sleep(1.0)
+        before_info_output = run_bluetoothctl_info(mac)
+        if bluetooth_info_connected(before_info_output):
+            remember_bluetooth_attempt(
+                mac,
+                target_name,
+                disconnect_output=disconnect_output,
+                info_output=before_info_output,
+            )
+            return False, "기존 블루투스 연결이 해제되지 않았습니다."
+
         connect_output = connect_bluetooth_device(mac)
-        remember_bluetooth_attempt(mac, target_name, connect_output)
+        time.sleep(1.0)
+        after_info_output = run_bluetoothctl_info(mac)
+        remember_bluetooth_attempt(
+            mac,
+            target_name,
+            connect_output=connect_output,
+            disconnect_output=disconnect_output,
+            info_output=after_info_output,
+        )
     except FileNotFoundError:
         return None, "bluetoothctl을 찾을 수 없습니다. BlueZ 설치가 필요합니다."
     except subprocess.TimeoutExpired:
@@ -2764,11 +2810,8 @@ def is_phone_detected_by_bluetooth():
     except OSError as exc:
         return None, f"블루투스 확인 오류: {exc}"
 
-    if bluetooth_connect_succeeded(connect_output):
+    if bluetooth_connect_succeeded(connect_output) and bluetooth_info_connected(after_info_output):
         return True, ""
-
-    if paired_error:
-        return False, paired_error
 
     return False, "휴대폰과 블루투스 직접 연결이 되지 않았습니다."
 
