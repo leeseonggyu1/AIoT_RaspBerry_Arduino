@@ -149,6 +149,12 @@ SLEEP_SUGGEST_DISMISS_SECONDS = env_or_config_int(
     "sleep_suggest_dismiss_seconds",
     3600,
 )
+SLEEP_AIRCON_CONFIRM_SECONDS = env_or_config_int(
+    "SLEEP_AIRCON_CONFIRM_SECONDS",
+    config,
+    "sleep_aircon_confirm_seconds",
+    300,
+)
 SLEEP_PRESETS = {
     "cool": {"label": "시원하게", "temp_on": 26.0, "temp_off": 24.0},
     "comfort": {"label": "쾌적하게", "temp_on": 27.0, "temp_off": 25.0},
@@ -180,6 +186,8 @@ state = {
     "aircon_on": False,
     "aircon_mode": "off",
     "aircon_target_temp": None,
+    "last_aircon_on_command_at": None,
+    "last_aircon_on_command_target": None,
     "humidifier_on": False,
     "auto_control": AUTO_CONTROL_DEFAULT,
     "temp_on": TEMP_ON,
@@ -2096,9 +2104,12 @@ def set_aircon_state(is_on, mode="off", target_temp=None):
         state["aircon_on"] = is_on
         state["aircon_mode"] = mode if is_on else "off"
         state["aircon_target_temp"] = target_temp if is_on else None
+        if not is_on:
+            state["last_aircon_on_command_at"] = None
+            state["last_aircon_on_command_target"] = None
 
 
-def set_aircon_cool(target_temp=None):
+def set_aircon_cool(target_temp=None, force_power_on=False):
     target_temp = clamp_cool_temp(target_temp if target_temp is not None else auto_cool_target_temp())
 
     with state_lock:
@@ -2106,19 +2117,24 @@ def set_aircon_cool(target_temp=None):
         current_mode = state["aircon_mode"]
         current_target_temp = state["aircon_target_temp"]
 
-    if current_on and current_mode == "cool" and current_target_temp == target_temp:
+    if not force_power_on and current_on and current_mode == "cool" and current_target_temp == target_temp:
         return f"Aircon is already cooling at {target_temp} C."
 
-    if current_on and current_mode == "cool":
+    if current_on and current_mode == "cool" and not force_power_on:
         command = f"AC_SET_COOL_{target_temp}"
     else:
-        if current_on:
+        if current_on and current_mode != "cool":
             set_aircon(False)
             time.sleep(1)
         command = f"AC_ON_COOL_{target_temp}"
 
     send_arduino_command(command)
     set_aircon_state(True, "cool", target_temp)
+    if command.startswith("AC_ON_COOL_"):
+        with state_lock:
+            state["last_aircon_on_command_at"] = time.time()
+            state["last_aircon_on_command_target"] = target_temp
+
     return f"Aircon cooling command sent: {target_temp} C."
 
 
@@ -2238,6 +2254,8 @@ def set_sleep_mode(target_on):
                 state["normal_temp_off"] = state["temp_off"]
             apply_sleep_preset_locked()
             state["auto_control"] = True
+            state["last_aircon_on_command_at"] = None
+            state["last_aircon_on_command_target"] = None
             state["sleep_suggestion_pending"] = False
             state["sleep_suggestion_ignored_until"] = None
             preset_label = state["sleep_preset_label"]
@@ -2462,6 +2480,9 @@ def maybe_auto_control(temperature, humidity=None):
         temp_off = state["temp_off"]
         presence_enabled = state["presence_enabled"]
         is_home = state["is_home"]
+        sleep_mode = state["sleep_mode"]
+        last_aircon_on_command_at = state["last_aircon_on_command_at"]
+        last_aircon_on_command_target = state["last_aircon_on_command_target"]
 
     if not auto_control:
         return
@@ -2486,11 +2507,22 @@ def maybe_auto_control(temperature, humidity=None):
             humidifier_on = False
 
     cool_target = clamp_cool_temp(temp_off)
+    sleep_confirm_due = (
+        sleep_mode
+        and (
+            last_aircon_on_command_at is None
+            or last_aircon_on_command_target != cool_target
+            or time.time() - last_aircon_on_command_at >= SLEEP_AIRCON_CONFIRM_SECONDS
+        )
+    )
 
     if temperature >= temp_on:
         if not aircon_on or aircon_mode != "cool" or aircon_target_temp != cool_target:
             print(f"Auto control: cooling to {cool_target} C")
-            set_aircon_cool(cool_target)
+            set_aircon_cool(cool_target, force_power_on=sleep_mode)
+        elif sleep_confirm_due:
+            print(f"Auto control: sleep mode power-on confirm at {cool_target} C")
+            set_aircon_cool(cool_target, force_power_on=True)
         return
 
     if humidity is not None and humidity > humidity_max:
