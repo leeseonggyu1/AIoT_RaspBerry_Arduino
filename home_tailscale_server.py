@@ -143,6 +143,14 @@ SLEEP_SUGGEST_DISMISS_SECONDS = env_or_config_int(
     "sleep_suggest_dismiss_seconds",
     3600,
 )
+SLEEP_PRESETS = {
+    "cool": {"label": "시원하게", "temp_on": 26.0, "temp_off": 24.0},
+    "comfort": {"label": "쾌적하게", "temp_on": 27.0, "temp_off": 25.0},
+    "warm": {"label": "따뜻하게", "temp_on": 28.0, "temp_off": 26.0},
+}
+SLEEP_PRESET_DEFAULT = env_or_config_str("SLEEP_PRESET", config, "sleep_preset", "comfort")
+if SLEEP_PRESET_DEFAULT not in SLEEP_PRESETS:
+    SLEEP_PRESET_DEFAULT = "comfort"
 
 # 기존 아두이노 스케치와 새 home_controller.ino가 둘 다 받을 수 있는 명령입니다.
 AIRCON_TOGGLE_COMMAND = "PUSH"
@@ -170,6 +178,8 @@ state = {
     "auto_control": AUTO_CONTROL_DEFAULT,
     "temp_on": TEMP_ON,
     "temp_off": TEMP_OFF,
+    "normal_temp_on": TEMP_ON,
+    "normal_temp_off": TEMP_OFF,
     "presence_enabled": PRESENCE_ENABLED,
     "presence_state": "unknown" if PRESENCE_ENABLED else "disabled",
     "is_home": False,
@@ -191,6 +201,8 @@ state = {
     "light_dark_threshold": LIGHT_DARK_THRESHOLD,
     "light_dark_when_low": LIGHT_DARK_WHEN_LOW,
     "sleep_mode": False,
+    "sleep_preset": SLEEP_PRESET_DEFAULT,
+    "sleep_preset_label": SLEEP_PRESETS[SLEEP_PRESET_DEFAULT]["label"],
     "sleep_suggestion_pending": False,
     "sleep_suggestion_ignored_until": None,
     "sleep_suggest_after_seconds": SLEEP_SUGGEST_AFTER_SECONDS,
@@ -1252,7 +1264,13 @@ INDEX_HTML = """<!doctype html>
             </button>
             <button class="simple-switch switch-only inactive" id="autoToggle" type="button" role="switch" aria-checked="false" aria-label="자동제어 OFF">OFF</button>
           </div>
-          <button class="simple-switch inactive" id="sleepToggle" type="button" role="switch" aria-checked="false">수면모드 OFF</button>
+          <div class="mode-card">
+            <button class="mode-label" id="sleepPresetToggle" type="button" aria-expanded="false" aria-controls="sleepPresetDrawer">
+              <span class="mode-title">수면모드</span>
+              <span class="mode-subtext" id="sleepPresetLabel">쾌적하게</span>
+            </button>
+            <button class="simple-switch switch-only inactive" id="sleepToggle" type="button" role="switch" aria-checked="false" aria-label="수면모드 OFF">OFF</button>
+          </div>
         </div>
       </div>
 
@@ -1290,6 +1308,21 @@ INDEX_HTML = """<!doctype html>
           </div>
           <div class="manual-hint">에어컨을 직접 켤 때도 이 꺼짐 온도를 목표 온도로 사용합니다.</div>
         </div>
+      </div>
+
+      <div class="auto-preset-drawer" id="sleepPresetDrawer">
+        <button class="preset-option" type="button" data-sleep-preset="cool">
+          <span>시원하게</span>
+          <small>켜짐 26.0 C / 꺼짐 24.0 C</small>
+        </button>
+        <button class="preset-option" type="button" data-sleep-preset="comfort">
+          <span>쾌적하게</span>
+          <small>켜짐 27.0 C / 꺼짐 25.0 C</small>
+        </button>
+        <button class="preset-option" type="button" data-sleep-preset="warm">
+          <span>따뜻하게</span>
+          <small>켜짐 28.0 C / 꺼짐 26.0 C</small>
+        </button>
       </div>
 
       <div class="simple-sleep-prompt" id="simpleSleepPrompt">
@@ -1407,6 +1440,10 @@ INDEX_HTML = """<!doctype html>
     const autoPresetDrawer = document.getElementById("autoPresetDrawer");
     const autoPresetLabel = document.getElementById("autoPresetLabel");
     const autoPresetButtons = Array.from(document.querySelectorAll("[data-auto-preset]"));
+    const sleepPresetToggle = document.getElementById("sleepPresetToggle");
+    const sleepPresetDrawer = document.getElementById("sleepPresetDrawer");
+    const sleepPresetLabel = document.getElementById("sleepPresetLabel");
+    const sleepPresetButtons = Array.from(document.querySelectorAll("[data-sleep-preset]"));
     const sleepToggle = document.getElementById("sleepToggle");
     const simpleSleepPrompt = document.getElementById("simpleSleepPrompt");
     const simpleAutoTemp = document.getElementById("simpleAutoTemp");
@@ -1419,11 +1456,18 @@ INDEX_HTML = """<!doctype html>
       cool: {label: "시원하게", tempOn: 24.0, tempOff: 22.0},
       manual: {label: "수동조절"},
     };
+    const SLEEP_PRESETS = {
+      cool: {label: "시원하게", tempOn: 26.0, tempOff: 24.0},
+      comfort: {label: "쾌적하게", tempOn: 27.0, tempOff: 25.0},
+      warm: {label: "따뜻하게", tempOn: 28.0, tempOff: 26.0},
+    };
     let currentStatus = null;
     let simpleThresholdDirty = false;
     let simpleThresholdSaveTimer = null;
     let autoPresetMode = localStorage.getItem("autoPresetMode") || "comfort";
     let autoPresetDrawerOpen = false;
+    let sleepPresetMode = localStorage.getItem("sleepPresetMode") || "comfort";
+    let sleepPresetDrawerOpen = false;
 
     function formatTempOption(value) {
       return value.toFixed(1);
@@ -1526,7 +1570,9 @@ INDEX_HTML = """<!doctype html>
       }
 
       if (status && autoPresetMode !== "manual") {
-        autoPresetMode = detectAutoPreset(status.temp_on, status.temp_off);
+        const presetTempOn = status.sleep_mode ? status.normal_temp_on : status.temp_on;
+        const presetTempOff = status.sleep_mode ? status.normal_temp_off : status.temp_off;
+        autoPresetMode = detectAutoPreset(presetTempOn, presetTempOff);
       }
 
       localStorage.setItem("autoPresetMode", autoPresetMode);
@@ -1538,6 +1584,21 @@ INDEX_HTML = """<!doctype html>
 
       autoPresetButtons.forEach((button) => {
         button.classList.toggle("active", button.dataset.autoPreset === autoPresetMode);
+      });
+    }
+
+    function updateSleepPresetUi(status = currentStatus) {
+      const statusPreset = status && status.sleep_preset ? status.sleep_preset : sleepPresetMode;
+      sleepPresetMode = SLEEP_PRESETS[statusPreset] ? statusPreset : "comfort";
+
+      localStorage.setItem("sleepPresetMode", sleepPresetMode);
+      sleepPresetLabel.textContent = SLEEP_PRESETS[sleepPresetMode].label;
+      sleepPresetDrawer.classList.toggle("visible", sleepPresetDrawerOpen);
+      sleepPresetToggle.classList.toggle("open", sleepPresetDrawerOpen);
+      sleepPresetToggle.setAttribute("aria-expanded", sleepPresetDrawerOpen ? "true" : "false");
+
+      sleepPresetButtons.forEach((button) => {
+        button.classList.toggle("active", button.dataset.sleepPreset === sleepPresetMode);
       });
     }
 
@@ -1655,7 +1716,7 @@ INDEX_HTML = """<!doctype html>
         ? "자동제어 중에는 가습기 수동 조작이 비활성화됩니다."
         : "가습기 전원을 전환합니다.";
       setSwitchOnly(autoToggle, "자동제어", status.auto_control);
-      setSimpleSwitch(sleepToggle, "수면모드", status.sleep_mode);
+      setSwitchOnly(sleepToggle, "수면모드", status.sleep_mode);
     }
 
     function renderPresence(status) {
@@ -1746,8 +1807,9 @@ INDEX_HTML = """<!doctype html>
       setPill(document.getElementById("aircon"), "에어컨", status.aircon_on);
       setPill(document.getElementById("humidifier"), "가습기", status.humidifier_on);
       setPill(document.getElementById("autoControl"), "자동 제어", status.auto_control, "auto");
-      document.getElementById("threshold").textContent =
-        `기준 ON ${status.temp_on.toFixed(1)} C / OFF ${status.temp_off.toFixed(1)} C`;
+      document.getElementById("threshold").textContent = status.sleep_mode
+        ? `수면 ${status.sleep_preset_label} ON ${status.temp_on.toFixed(1)} C / OFF ${status.temp_off.toFixed(1)} C`
+        : `기준 ON ${status.temp_on.toFixed(1)} C / OFF ${status.temp_off.toFixed(1)} C`;
 
       if (document.activeElement !== tempOnInput) {
         tempOnInput.value = status.temp_on.toFixed(1);
@@ -1756,9 +1818,10 @@ INDEX_HTML = """<!doctype html>
         tempOffInput.value = status.temp_off.toFixed(1);
       }
       if (!simpleThresholdDirty) {
-        syncSimpleThresholdControls(status.temp_on, status.temp_off);
+        syncSimpleThresholdControls(status.normal_temp_on, status.normal_temp_off);
       }
       updateAutoPresetUi(status);
+      updateSleepPresetUi(status);
 
       document.getElementById("lastLine").textContent = status.last_arduino_line || "없음";
       document.getElementById("updated").textContent =
@@ -1890,6 +1953,11 @@ INDEX_HTML = """<!doctype html>
       updateAutoPresetUi();
     }
 
+    function setSleepPresetDrawer(open) {
+      sleepPresetDrawerOpen = open;
+      updateSleepPresetUi();
+    }
+
     async function applyAutoPreset(mode) {
       if (!AUTO_PRESETS[mode]) {
         return;
@@ -1909,6 +1977,18 @@ INDEX_HTML = """<!doctype html>
       const preset = AUTO_PRESETS[mode];
       simpleMessage.textContent = `${preset.label} 모드 적용 중`;
       await saveSimpleThresholdsAuto(preset.tempOn, preset.tempOff);
+    }
+
+    async function applySleepPreset(mode) {
+      if (!SLEEP_PRESETS[mode]) {
+        return;
+      }
+
+      sleepPresetMode = mode;
+      localStorage.setItem("sleepPresetMode", sleepPresetMode);
+      setSleepPresetDrawer(false);
+      simpleMessage.textContent = `${SLEEP_PRESETS[mode].label} 수면 프리셋 적용 중`;
+      await sendCommandPayload("set_sleep_preset", {preset: mode});
     }
 
     document.querySelectorAll("[data-command]").forEach((button) => {
@@ -1943,6 +2023,12 @@ INDEX_HTML = """<!doctype html>
     });
     autoPresetButtons.forEach((button) => {
       button.addEventListener("click", () => applyAutoPreset(button.dataset.autoPreset));
+    });
+    sleepPresetToggle.addEventListener("click", () => {
+      setSleepPresetDrawer(!sleepPresetDrawerOpen);
+    });
+    sleepPresetButtons.forEach((button) => {
+      button.addEventListener("click", () => applySleepPreset(button.dataset.sleepPreset));
     });
     sleepToggle.addEventListener("click", () => {
       sendCommand(currentStatus && currentStatus.sleep_mode ? "sleep_off" : "sleep_on");
@@ -2073,22 +2159,78 @@ def set_humidifier(target_on):
 def set_auto_control(target_on):
     with state_lock:
         state["auto_control"] = target_on
+        sleep_was_on = state["sleep_mode"]
+        if not target_on and sleep_was_on:
+            state["sleep_mode"] = False
+            restore_normal_thresholds_locked()
+
+    if not target_on and sleep_was_on:
+        return "자동 제어를 껐습니다. 수면모드도 함께 껐습니다."
 
     return f"자동 제어를 {'켰습니다' if target_on else '껐습니다'}."
 
 
+def apply_sleep_preset_locked():
+    preset_key = state["sleep_preset"]
+    preset = SLEEP_PRESETS.get(preset_key, SLEEP_PRESETS["comfort"])
+    state["temp_on"] = preset["temp_on"]
+    state["temp_off"] = preset["temp_off"]
+    state["sleep_preset_label"] = preset["label"]
+
+
+def restore_normal_thresholds_locked():
+    state["temp_on"] = state["normal_temp_on"]
+    state["temp_off"] = state["normal_temp_off"]
+
+
+def set_sleep_preset(preset_key):
+    if preset_key not in SLEEP_PRESETS:
+        raise ValueError("알 수 없는 수면 프리셋입니다.")
+
+    preset = SLEEP_PRESETS[preset_key]
+    with state_lock:
+        state["sleep_preset"] = preset_key
+        state["sleep_preset_label"] = preset["label"]
+        sleep_mode = state["sleep_mode"]
+        if sleep_mode:
+            apply_sleep_preset_locked()
+
+    save_config({"sleep_preset": preset_key})
+
+    if sleep_mode:
+        return (
+            f"수면모드 {preset['label']} 프리셋을 적용했습니다. "
+            f"ON {preset['temp_on']:.1f} C / OFF {preset['temp_off']:.1f} C"
+        )
+
+    return f"수면모드 프리셋을 {preset['label']}로 저장했습니다."
+
+
 def set_sleep_mode(target_on):
     with state_lock:
+        was_sleeping = state["sleep_mode"]
         state["sleep_mode"] = target_on
         if target_on:
+            if not was_sleeping:
+                state["normal_temp_on"] = state["temp_on"]
+                state["normal_temp_off"] = state["temp_off"]
+            apply_sleep_preset_locked()
             state["auto_control"] = True
             state["sleep_suggestion_pending"] = False
             state["sleep_suggestion_ignored_until"] = None
+            preset_label = state["sleep_preset_label"]
+            temp_on = state["temp_on"]
+            temp_off = state["temp_off"]
+        else:
+            restore_normal_thresholds_locked()
 
     if target_on:
-        return "수면모드를 켰습니다. 자동제어도 함께 켰습니다."
+        return (
+            f"수면모드를 켰습니다. {preset_label} 프리셋으로 자동제어를 시작합니다. "
+            f"ON {temp_on:.1f} C / OFF {temp_off:.1f} C"
+        )
 
-    return "수면모드를 껐습니다."
+    return "수면모드를 껐습니다. 일반 자동제어 기준으로 돌아갑니다."
 
 
 def dismiss_sleep_suggestion():
@@ -2122,11 +2264,26 @@ def set_auto_thresholds(temp_on, temp_off):
         raise ValueError("ON 기준 온도는 OFF 기준 온도보다 높아야 합니다.")
 
     with state_lock:
-        state["temp_on"] = temp_on
-        state["temp_off"] = temp_off
+        state["normal_temp_on"] = temp_on
+        state["normal_temp_off"] = temp_off
+        sleep_mode = state["sleep_mode"]
+        if not sleep_mode:
+            state["temp_on"] = temp_on
+            state["temp_off"] = temp_off
 
     if save_config({"temp_on": temp_on, "temp_off": temp_off}):
+        if sleep_mode:
+            return (
+                f"일반 자동 제어 기준을 ON {temp_on:.1f} C / OFF {temp_off:.1f} C로 저장했습니다. "
+                "현재 수면모드는 수면 프리셋 기준으로 동작 중입니다."
+            )
         return f"자동 제어 기준을 ON {temp_on:.1f} C / OFF {temp_off:.1f} C로 저장했습니다."
+
+    if sleep_mode:
+        return (
+            f"일반 자동 제어 기준을 ON {temp_on:.1f} C / OFF {temp_off:.1f} C로 이번 실행에 저장했습니다. "
+            "현재 수면모드는 수면 프리셋 기준으로 동작 중입니다."
+        )
 
     return f"자동 제어 기준을 ON {temp_on:.1f} C / OFF {temp_off:.1f} C로 이번 실행에 적용했습니다."
 
@@ -2666,6 +2823,10 @@ def run_command(payload):
         return set_sleep_mode(True)
     if command == "sleep_off":
         return set_sleep_mode(False)
+    if command == "set_sleep_preset":
+        if not isinstance(payload, dict):
+            raise ValueError("수면 프리셋 데이터가 필요합니다.")
+        return set_sleep_preset(str(payload.get("preset", "")).strip())
     if command == "dismiss_sleep_suggestion":
         return dismiss_sleep_suggestion()
     if command == "set_thresholds":

@@ -1,5 +1,6 @@
 {
   "temp_on": 26.0,
   "temp_off": 24.0,
+  "sleep_preset": "comfort",
   "light_dark_threshold": 150
 }
