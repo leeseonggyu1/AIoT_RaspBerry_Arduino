@@ -115,6 +115,12 @@ PHONE_BLUETOOTH_MAC = normalize_mac(env_or_config_str("PHONE_BLUETOOTH_MAC", con
 PHONE_NAME_KEYWORD = env_or_config_str("PHONE_NAME_KEYWORD", config, "phone_name_keyword")
 BLUETOOTH_SCAN_INTERVAL = env_or_config_int("BLUETOOTH_SCAN_INTERVAL", config, "bluetooth_scan_interval", 30)
 BLUETOOTH_SCAN_SECONDS = env_or_config_int("BLUETOOTH_SCAN_SECONDS", config, "bluetooth_scan_seconds", 8)
+BLUETOOTH_CONNECT_TIMEOUT = env_or_config_int(
+    "BLUETOOTH_CONNECT_TIMEOUT",
+    config,
+    "bluetooth_connect_timeout",
+    10,
+)
 BLUETOOTH_PAIRED_CACHE_SECONDS = env_or_config_int(
     "BLUETOOTH_PAIRED_CACHE_SECONDS",
     config,
@@ -2646,6 +2652,27 @@ def run_bluetoothctl_info(mac):
     return run_bluetoothctl(["info", mac])
 
 
+def bluetooth_info_connected(output):
+    return bool(re.search(r"^\s*Connected:\s*yes\s*$", output, re.IGNORECASE | re.MULTILINE))
+
+
+def bluetooth_connect_succeeded(output):
+    output_lower = output.lower()
+    return (
+        "connection successful" in output_lower
+        or "already connected" in output_lower
+        or "alreadyconnected" in output_lower
+    )
+
+
+def connect_bluetooth_device(mac):
+    if not has_real_mac(mac):
+        return ""
+
+    run_bluetoothctl(["power", "on"], timeout=5)
+    return run_bluetoothctl(["connect", mac], timeout=BLUETOOTH_CONNECT_TIMEOUT)
+
+
 def scan_bluetooth_devices():
     process = subprocess.Popen(
         ["bluetoothctl"],
@@ -2688,8 +2715,11 @@ def is_phone_detected_by_bluetooth():
         if not has_real_mac(mac) and name:
             mac, _, paired_error = resolve_paired_phone_by_name()
 
-        scan_output = scan_bluetooth_devices()
-        available_macs, available_names = parse_scan_available_devices(scan_output)
+        if not has_real_mac(mac):
+            return False, paired_error
+
+        connect_output = connect_bluetooth_device(mac)
+        info_output = run_bluetoothctl_info(mac)
     except FileNotFoundError:
         return None, "bluetoothctl을 찾을 수 없습니다. BlueZ 설치가 필요합니다."
     except subprocess.TimeoutExpired:
@@ -2697,13 +2727,13 @@ def is_phone_detected_by_bluetooth():
     except OSError as exc:
         return None, f"블루투스 확인 오류: {exc}"
 
-    if has_real_mac(mac) and mac in available_macs:
+    if bluetooth_connect_succeeded(connect_output) or bluetooth_info_connected(info_output):
         return True, ""
 
-    if name and any(name in available_name.lower() for available_name in available_names):
-        return True, ""
+    if paired_error:
+        return False, paired_error
 
-    return False, paired_error
+    return False, "휴대폰과 블루투스 직접 연결이 되지 않았습니다."
 
 
 def update_presence_state(detected, error_message=""):
