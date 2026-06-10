@@ -1730,14 +1730,6 @@ INDEX_HTML = """<!doctype html>
         return;
       }
 
-      if (status.is_home) {
-        element.textContent = "재실 감지 ON";
-        element.className = "pill on";
-        simplePresence.textContent = "재실중";
-        simplePresence.className = "top-status presence-chip home";
-        return;
-      }
-
       if (status.presence_state === "away") {
         element.textContent = "외출";
         element.className = "pill off";
@@ -1746,11 +1738,27 @@ INDEX_HTML = """<!doctype html>
         return;
       }
 
-      if (status.presence_missing_seconds !== null) {
+      if (status.presence_state === "missing" || status.presence_missing_seconds !== null) {
         element.textContent =
           `미감지 ${status.presence_missing_seconds}/${status.away_after_seconds}초`;
         simplePresence.textContent =
           `미감지 ${status.presence_missing_seconds}초`;
+        element.className = "pill auto";
+        simplePresence.className = "top-status presence-chip checking";
+        return;
+      }
+
+      if (status.is_home) {
+        element.textContent = "재실 감지 ON";
+        element.className = "pill on";
+        simplePresence.textContent = "재실중";
+        simplePresence.className = "top-status presence-chip home";
+        return;
+      }
+
+      if (status.last_presence_error) {
+        element.textContent = "재실 확인 오류";
+        simplePresence.textContent = "재실 확인 오류";
       } else {
         element.textContent = "재실 확인 중";
         simplePresence.textContent = "재실 확인 중";
@@ -2528,7 +2536,7 @@ def parse_bluetooth_devices(output):
     devices = []
 
     for line in output.splitlines():
-        match = re.match(r"^\s*Device\s+([0-9a-fA-F:]{17})\s+(.+?)\s*$", line)
+        match = re.match(r"^\s*(?:\[[A-Z]+\]\s+)?Device\s+([0-9a-fA-F:]{17})\s+(.+?)\s*$", line)
         if match:
             devices.append((normalize_mac(match.group(1)), match.group(2).strip()))
 
@@ -2612,7 +2620,9 @@ def scan_bluetooth_devices():
         process.stdin.flush()
         stop_event.wait(BLUETOOTH_SCAN_SECONDS)
 
-        process.stdin.write("devices\nscan off\nquit\n")
+        # Do not call `devices` here. BlueZ keeps paired/cached devices in that
+        # list, so it can make an offline phone look present.
+        process.stdin.write("scan off\nquit\n")
         process.stdin.flush()
 
         stdout, stderr = process.communicate(timeout=8)
