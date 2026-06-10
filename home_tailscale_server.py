@@ -2547,6 +2547,51 @@ def parse_bluetooth_devices(output):
     return devices
 
 
+def looks_like_bluetooth_property(value):
+    return bool(re.match(r"^[A-Za-z][A-Za-z0-9_-]*\s*:", value.strip()))
+
+
+def parse_scan_available_devices(output):
+    macs = set()
+    names = []
+
+    for line in output.splitlines():
+        match = re.match(r"^\s*\[(NEW|CHG)\]\s+Device\s+([0-9a-fA-F:]{17})\s+(.+?)\s*$", line)
+        if not match:
+            continue
+
+        event = match.group(1)
+        mac = normalize_mac(match.group(2))
+        value = match.group(3).strip()
+        value_lower = value.lower()
+
+        if event == "NEW":
+            macs.add(mac)
+            if not looks_like_bluetooth_property(value):
+                names.append(value)
+            continue
+
+        if value_lower.startswith(
+            (
+                "rssi:",
+                "txpower:",
+                "manufacturerdata",
+                "servicedata",
+                "service data",
+                "uuids:",
+                "name:",
+                "alias:",
+                "connected: yes",
+            )
+        ):
+            macs.add(mac)
+
+        if value_lower.startswith(("name:", "alias:")):
+            names.append(value.split(":", 1)[1].strip())
+
+    return macs, names
+
+
 def update_resolved_phone(mac="", name=""):
     with state_lock:
         state["resolved_phone_mac"] = mac
@@ -2652,12 +2697,8 @@ def is_phone_detected_by_bluetooth():
         if not has_real_mac(mac) and name:
             mac, _, paired_error = resolve_paired_phone_by_name()
 
-        if has_real_mac(mac):
-            info_output = run_bluetoothctl_info(mac).lower()
-            if "connected: yes" in info_output:
-                return True, ""
-
-        scan_output = scan_bluetooth_devices().lower()
+        scan_output = scan_bluetooth_devices()
+        available_macs, available_names = parse_scan_available_devices(scan_output)
     except FileNotFoundError:
         return None, "bluetoothctl을 찾을 수 없습니다. BlueZ 설치가 필요합니다."
     except subprocess.TimeoutExpired:
@@ -2665,10 +2706,10 @@ def is_phone_detected_by_bluetooth():
     except OSError as exc:
         return None, f"블루투스 확인 오류: {exc}"
 
-    if has_real_mac(mac) and mac in scan_output:
+    if has_real_mac(mac) and mac in available_macs:
         return True, ""
 
-    if name and name in scan_output:
+    if name and any(name in available_name.lower() for available_name in available_names):
         return True, ""
 
     return False, paired_error
