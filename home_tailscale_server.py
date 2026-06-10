@@ -2566,14 +2566,14 @@ def parse_scan_available_devices(output):
         value_lower = value.lower()
 
         if event == "NEW":
-            macs.add(mac)
             if not looks_like_bluetooth_property(value):
                 names_by_mac[mac] = value
             continue
 
         # RSSI is the useful signal here: it means the adapter received a fresh
         # radio update during this scan. Name/Alias/UUID changes can be emitted
-        # from BlueZ's known-device cache and should not count as presence.
+        # from BlueZ's known-device cache, and even NEW can be replayed from
+        # cache when scanning starts, so neither should count as presence.
         if value_lower.startswith("rssi:"):
             macs.add(mac)
 
