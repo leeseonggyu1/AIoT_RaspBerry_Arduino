@@ -2645,24 +2645,9 @@ def resolve_paired_phone_by_name():
     return "", "", "페어링된 블루투스 기기가 없습니다. 먼저 휴대폰을 pair/trust 해주세요."
 
 
-def run_bluetoothctl_info(mac):
-    if not has_real_mac(mac):
-        return ""
-
-    return run_bluetoothctl(["info", mac])
-
-
-def bluetooth_info_connected(output):
-    return bool(re.search(r"^\s*Connected:\s*yes\s*$", output, re.IGNORECASE | re.MULTILINE))
-
-
 def bluetooth_connect_succeeded(output):
     output_lower = output.lower()
-    return (
-        "connection successful" in output_lower
-        or "already connected" in output_lower
-        or "alreadyconnected" in output_lower
-    )
+    return "connection successful" in output_lower
 
 
 def connect_bluetooth_device(mac):
@@ -2671,6 +2656,11 @@ def connect_bluetooth_device(mac):
 
     run_bluetoothctl(["power", "on"], timeout=5)
     return run_bluetoothctl(["connect", mac], timeout=BLUETOOTH_CONNECT_TIMEOUT)
+
+
+def disconnect_bluetooth_device(mac):
+    if has_real_mac(mac):
+        run_bluetoothctl(["disconnect", mac], timeout=5)
 
 
 def scan_bluetooth_devices():
@@ -2718,8 +2708,9 @@ def is_phone_detected_by_bluetooth():
         if not has_real_mac(mac):
             return False, paired_error
 
+        disconnect_bluetooth_device(mac)
+        time.sleep(0.5)
         connect_output = connect_bluetooth_device(mac)
-        info_output = run_bluetoothctl_info(mac)
     except FileNotFoundError:
         return None, "bluetoothctl을 찾을 수 없습니다. BlueZ 설치가 필요합니다."
     except subprocess.TimeoutExpired:
@@ -2727,7 +2718,7 @@ def is_phone_detected_by_bluetooth():
     except OSError as exc:
         return None, f"블루투스 확인 오류: {exc}"
 
-    if bluetooth_connect_succeeded(connect_output) or bluetooth_info_connected(info_output):
+    if bluetooth_connect_succeeded(connect_output):
         return True, ""
 
     if paired_error:
