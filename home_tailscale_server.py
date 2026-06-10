@@ -2553,7 +2553,7 @@ def looks_like_bluetooth_property(value):
 
 def parse_scan_available_devices(output):
     macs = set()
-    names = []
+    names_by_mac = {}
 
     for line in output.splitlines():
         match = re.match(r"^\s*\[(NEW|CHG)\]\s+Device\s+([0-9a-fA-F:]{17})\s+(.+?)\s*$", line)
@@ -2568,28 +2568,19 @@ def parse_scan_available_devices(output):
         if event == "NEW":
             macs.add(mac)
             if not looks_like_bluetooth_property(value):
-                names.append(value)
+                names_by_mac[mac] = value
             continue
 
-        if value_lower.startswith(
-            (
-                "rssi:",
-                "txpower:",
-                "manufacturerdata",
-                "servicedata",
-                "service data",
-                "uuids:",
-                "name:",
-                "alias:",
-                "connected: yes",
-            )
-        ):
+        # RSSI is the useful signal here: it means the adapter received a fresh
+        # radio update during this scan. Name/Alias/UUID changes can be emitted
+        # from BlueZ's known-device cache and should not count as presence.
+        if value_lower.startswith("rssi:"):
             macs.add(mac)
 
         if value_lower.startswith(("name:", "alias:")):
-            names.append(value.split(":", 1)[1].strip())
+            names_by_mac[mac] = value.split(":", 1)[1].strip()
 
-    return macs, names
+    return macs, [name for mac, name in names_by_mac.items() if mac in macs]
 
 
 def update_resolved_phone(mac="", name=""):
