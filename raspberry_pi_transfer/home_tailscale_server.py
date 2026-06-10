@@ -1716,6 +1716,9 @@ INDEX_HTML = """<!doctype html>
         ? "자동제어 중에는 가습기 수동 조작이 비활성화됩니다."
         : "가습기 전원을 전환합니다.";
       setSwitchOnly(autoToggle, "자동제어", status.auto_control);
+      autoToggle.title = status.sleep_mode
+        ? "수면모드 중에는 자동제어를 끌 수 없습니다. 수면모드를 먼저 끄세요."
+        : "자동제어를 전환합니다.";
       setSwitchOnly(sleepToggle, "수면모드", status.sleep_mode);
     }
 
@@ -2024,6 +2027,10 @@ INDEX_HTML = """<!doctype html>
       sendCommand(currentStatus && currentStatus.humidifier_on ? "humidifier_off" : "humidifier_on");
     });
     autoToggle.addEventListener("click", () => {
+      if (currentStatus && currentStatus.sleep_mode && currentStatus.auto_control) {
+        simpleMessage.textContent = "수면모드 중에는 자동제어를 끌 수 없습니다. 수면모드를 먼저 끄세요.";
+        return;
+      }
       sendCommand(currentStatus && currentStatus.auto_control ? "auto_off" : "auto_on");
     });
     autoPresetToggle.addEventListener("click", () => {
@@ -2166,14 +2173,10 @@ def set_humidifier(target_on):
 
 def set_auto_control(target_on):
     with state_lock:
-        state["auto_control"] = target_on
-        sleep_was_on = state["sleep_mode"]
-        if not target_on and sleep_was_on:
-            state["sleep_mode"] = False
-            restore_normal_thresholds_locked()
+        if not target_on and state["sleep_mode"]:
+            return "수면모드 중에는 자동제어를 끌 수 없습니다. 수면모드를 먼저 끄세요."
 
-    if not target_on and sleep_was_on:
-        return "자동 제어를 껐습니다. 수면모드도 함께 껐습니다."
+        state["auto_control"] = target_on
 
     return f"자동 제어를 {'켰습니다' if target_on else '껐습니다'}."
 
@@ -2231,6 +2234,7 @@ def set_sleep_mode(target_on):
             temp_off = state["temp_off"]
         else:
             restore_normal_thresholds_locked()
+            state["auto_control"] = False
 
     if target_on:
         return (
@@ -2238,7 +2242,7 @@ def set_sleep_mode(target_on):
             f"ON {temp_on:.1f} C / OFF {temp_off:.1f} C"
         )
 
-    return "수면모드를 껐습니다. 일반 자동제어 기준으로 돌아갑니다."
+    return "수면모드를 껐습니다. 자동제어도 함께 껐습니다."
 
 
 def dismiss_sleep_suggestion():
